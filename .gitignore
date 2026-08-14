@@ -69,5 +69,13 @@ crashlytics-build.properties
 /[Aa]ssets/[Ss]treamingAssets/aa.meta
 /[Aa]ssets/[Ss]treamingAssets/aa/*
 
+# Android/Gradle/CMake intermediate build cache (created at project root
+# by Build And Run, not by the Editor itself)
+.utmp/
+
+# Unity Burst backup/debug folders (named after the product, hence the glob)
+*_BackUpThisFolder_ButDontShipItWithYourGame/
+*_BurstDebugInformation_DoNotShip/
+
 # macOS
 .DS_Store
