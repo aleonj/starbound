@@ -37,14 +37,18 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void Move_SecondVoluntaryMoveInSameTurn_Throws()
+        public void Move_MultipleTimesInSameTurn_ChainsSuccessfully()
         {
-            var (match, _, _) = BuildMatch();
+            var (match, p1, _) = BuildMatch();
             match.RollDice(new Random(1));
-            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
 
-            Assert.Throws<InvalidOperationException>(() =>
-                match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(0, 0), new Random(1)));
+            var first = match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            var second = match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1));
+
+            Assert.IsTrue(first.Success);
+            Assert.IsTrue(second.Success);
+            Assert.AreEqual(new HexCoordinate(2, 0), p1.Position);
+            Assert.IsTrue(match.CanMove); // still open — ordinary/planet terrain never locks movement on its own
         }
 
         [Test]
@@ -64,7 +68,7 @@ namespace StarBound.Tests
             Assert.IsFalse(match.CanEndTurn);
             Assert.Throws<InvalidOperationException>(() => match.EndTurn());
 
-            match.ResolveActiveEngagement();
+            match.ResolveActiveEngagement(new Random(1));
 
             Assert.IsFalse(match.IsInEngagement);
         }
@@ -148,10 +152,16 @@ namespace StarBound.Tests
             p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
             p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
 
-            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress)
-                match.ActiveEngagement.ResolveRound(new Random(1));
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
 
-            match.ResolveActiveEngagement();
+            match.ResolveActiveEngagement(new Random(1));
 
             Assert.IsFalse(match.IsInEngagement);
             Assert.IsNull(match.ActiveEngagement);
@@ -175,10 +185,16 @@ namespace StarBound.Tests
             p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
             p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
 
-            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress)
-                match.ActiveEngagement.ResolveRound(new Random(1));
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
 
-            match.ResolveActiveEngagement();
+            match.ResolveActiveEngagement(new Random(1));
 
             Assert.IsTrue(match.IsComplete);
             Assert.AreEqual(p1, match.Winner);
@@ -196,50 +212,166 @@ namespace StarBound.Tests
             opponent.ApplyStatDelta(CoreStat.Shields, 20);
             opponent.ApplyStatDelta(CoreStat.Speed, 20);
 
-            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress)
-                match.ActiveEngagement.ResolveRound(new Random(1));
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
 
             Assert.AreEqual(EngagementOutcome.PlayerLost, match.ActiveEngagement.Outcome);
 
-            match.ResolveActiveEngagement();
+            match.ResolveActiveEngagement(new Random(1));
 
             Assert.AreEqual(0, p1.Ship.Money);
             Assert.AreEqual(new HexCoordinate(2, 0), p1.Position);
+
+            // Losing didn't defeat the opponent — it's still guarding the hex.
+            Assert.IsTrue(match.Map.TryGetHex(new HexCoordinate(0, -1), out var engagementHex));
+            Assert.AreEqual(EngagementTier.Easy, engagementHex.Engagement);
         }
 
         [Test]
-        public void ResolveActiveEngagement_PlayerEscapes_RequiresMoveBeforeEndingTurn()
+        public void ResolveActiveEngagement_PlayerEscapes_LeavesMarkerOnTheMap()
         {
             var (match, p1, _) = BuildMatch();
             match.RollDice(new Random(1));
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
 
-            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape success
             match.ActiveEngagement.AttemptEscape(new Random(1));
 
             Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome);
 
-            match.ResolveActiveEngagement();
+            match.ResolveActiveEngagement(new Random(1));
 
-            Assert.IsFalse(match.CanEndTurn);
-            Assert.Throws<InvalidOperationException>(() => match.EndTurn());
+            Assert.IsTrue(match.Map.TryGetHex(new HexCoordinate(0, -1), out var engagementHex));
+            Assert.AreEqual(EngagementTier.Easy, engagementHex.Engagement);
+        }
 
-            match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(-1, 0), new Random(1));
+        [Test]
+        public void CanAttackOpponent_TrueWhenPlayersShareAHex()
+        {
+            var (match, _, _) = BuildMatch(); // p1 and p2 both start at (0,0)
 
+            Assert.IsTrue(match.IsOnOpponentHex);
+            Assert.IsTrue(match.CanAttackOpponent);
+        }
+
+        [Test]
+        public void AttackOpponent_WhenNotSharingAHex_Throws()
+        {
+            var (match, _, p2) = BuildMatch();
+            p2.Position = new HexCoordinate(1, 0);
+
+            Assert.IsFalse(match.CanAttackOpponent);
+            Assert.Throws<InvalidOperationException>(() => match.AttackOpponent());
+        }
+
+        [Test]
+        public void AttackOpponent_StartsAPvPEngagementAgainstTheOtherPlayersRealShip()
+        {
+            var (match, _, p2) = BuildMatch();
+
+            match.AttackOpponent();
+
+            Assert.IsTrue(match.IsInEngagement);
+            Assert.IsTrue(match.ActiveEngagement.IsPvP);
+            Assert.AreSame(p2.Ship, match.ActiveEngagement.Opponent);
+            Assert.IsFalse(match.CanMove);
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_PvPPlayerWins_DoesNotRecordTierWinAndAppliesPenaltyToDefeatedOpponent()
+        {
+            var (match, p1, p2) = BuildMatch();
+            match.AttackOpponent();
+
+            p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+            p2.Ship.AddMoney(50);
+
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
+
+            Assert.AreEqual(EngagementOutcome.PlayerWon, match.ActiveEngagement.Outcome);
+
+            match.ResolveActiveEngagement(new Random(1));
+
+            Assert.AreEqual(0, p1.EasyEngagementWins);
+            Assert.IsFalse(p1.HasWonMatch);
+            Assert.AreEqual(0, p2.Ship.GetStat(CoreStat.Hull));
+            Assert.AreEqual(0, p2.Ship.Money); // integrity penalty clears money/items
+            Assert.AreEqual(new HexCoordinate(2, 0), p2.Position); // relocated to nearest planet
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_PvP_DoesNotClearAnUnrelatedEngagementMarkerOnTheSharedHex()
+        {
+            var (match, p1, _) = BuildMatch();
+            match.Map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+
+            match.AttackOpponent();
+            p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
+
+            match.ResolveActiveEngagement(new Random(1));
+
+            Assert.IsTrue(match.Map.TryGetHex(new HexCoordinate(0, 0), out var hex));
+            Assert.AreEqual(EngagementTier.Easy, hex.Engagement);
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_PlayerEscapes_RelocatesToARandomAdjacentHexWithoutASeparateMove()
+        {
+            var (match, p1, _) = BuildMatch();
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape success
+            match.ActiveEngagement.AttemptEscape(new Random(1));
+
+            Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome);
+
+            match.ResolveActiveEngagement(new Random(1));
+
+            // Relocated automatically — the only two engagement-free
+            // neighbors of (0, -1) on this map are (-1, 0) and (0, 0).
+            var validDestinations = new[] { new HexCoordinate(-1, 0), new HexCoordinate(0, 0) };
+            CollectionAssert.Contains(validDestinations, p1.Position);
             Assert.IsTrue(match.CanEndTurn);
             Assert.DoesNotThrow(() => match.EndTurn());
         }
 
         [Test]
-        public void ResolveActiveEngagement_PlayerEscapes_WaivesMoveRequirementWhenNoLegalMoveExists()
+        public void ResolveActiveEngagement_PlayerEscapes_StaysPutWhenNoSafeAdjacentHexExists()
         {
             var map = new GameMap(radius: 3, Difficulty.Medium);
             map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
             // Deliberately the ONLY hex on the map — ShipMover never checks
             // whether the 'from' hex exists, only that the target does, so
             // the initial move still works. Every neighbor of (0, -1),
-            // including (0, 0) itself, is absent from the map, so no die
-            // (whatever it rolled) can find a legal target there.
+            // including (0, 0) itself, is absent from the map, so there's
+            // nowhere for the escape relocation to send the player.
 
             var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
             var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
@@ -250,9 +382,9 @@ namespace StarBound.Tests
 
             p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape success
             match.ActiveEngagement.AttemptEscape(new Random(1));
-            match.ResolveActiveEngagement();
+            match.ResolveActiveEngagement(new Random(1));
 
-            Assert.IsFalse(match.MustMoveAfterEscape);
+            Assert.AreEqual(new HexCoordinate(0, -1), p1.Position); // nowhere to go — stayed put
             Assert.IsTrue(match.CanEndTurn);
         }
 
@@ -260,23 +392,32 @@ namespace StarBound.Tests
         public void CanShop_BlockedAfterEngagementResolvesThisTurn_ResetsNextTurn()
         {
             var (match, p1, _) = BuildMatch();
+            match.RollDice(new Random(1));
             Assert.IsTrue(match.CanShop);
 
-            match.RollDice(new Random(1));
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
 
             p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
             p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
             p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
-            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress)
-                match.ActiveEngagement.ResolveRound(new Random(1));
 
-            match.ResolveActiveEngagement();
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
+
+            match.ResolveActiveEngagement(new Random(1));
 
             Assert.IsFalse(match.CanShop);
 
             match.EndTurn();
 
+            Assert.IsFalse(match.CanShop); // new turn — must roll dice first
+            match.RollDice(new Random(1));
             Assert.IsTrue(match.CanShop);
         }
 
@@ -295,16 +436,16 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void Move_OntoOrdinaryTerrainAfterPlanet_LocksMovement()
+        public void Move_OntoOrdinaryTerrainAfterPlanet_StillLeavesMovementOpen()
         {
             var (match, _) = BuildPlanetContinuationMatch();
             match.RollDice(new Random(1));
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
             match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1));
 
-            Assert.IsFalse(match.CanMove);
-            Assert.Throws<InvalidOperationException>(() =>
-                match.Move(new RolledDie(2, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1)));
+            // (2, 0) is ordinary ClearSpace, not a planet — movement should
+            // still be open, since only an engagement or EnterMarket locks it.
+            Assert.IsTrue(match.CanMove);
         }
 
         [Test]
@@ -322,6 +463,31 @@ namespace StarBound.Tests
             Assert.Throws<InvalidOperationException>(() =>
                 match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1)));
             Assert.IsTrue(match.CanEndTurn);
+        }
+
+        [Test]
+        public void CanShop_FalseBeforeRollingDice_EvenWhenAlreadyOnAPlanet()
+        {
+            // Covers starting a turn already docked (e.g. match start, per
+            // MatchFactory's per-player planet starts, or having ended a
+            // prior turn on a planet) — shopping still requires taking an
+            // action (rolling dice) first, not just standing on the hex.
+            var map = new GameMap(radius: 2, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace));
+
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(1, 0) };
+            var match = new Match(map, p1, p2);
+
+            Assert.IsTrue(match.IsCurrentPlayerOnPlanet);
+            Assert.IsFalse(match.CanShop);
+            Assert.Throws<InvalidOperationException>(() => match.EnterMarket());
+
+            match.RollDice(new Random(1));
+
+            Assert.IsTrue(match.CanShop);
+            Assert.DoesNotThrow(() => match.EnterMarket());
         }
     }
 }

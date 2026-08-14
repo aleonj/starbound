@@ -9,29 +9,39 @@ namespace StarBound.Combat
     public readonly struct RoundResult
     {
         public RoundAttacker Attacker { get; }
-        public int SpeedRoll { get; }
-        public int SpeedTotal { get; }
-        public int OpponentSpeed { get; }
-
-        // Null when the opponent is the attacker — NPCs never roll, so
-        // their attack is a flat Weapons-vs-Shields comparison.
-        public int? AttackRoll { get; }
+        public int AttackRoll { get; }
         public int AttackTotal { get; }
-        public int DefenderShields { get; }
+
+        // The defender now rolls too: a d10 + Shields (+ Brace bonus when
+        // the player braced against an opponent attack) contested against
+        // the attacker's total, rather than a flat Shields threshold.
+        public int DefenseRoll { get; }
+        public int DefenseTotal { get; }
         public bool HitLanded { get; }
 
+        // A natural 10 on the attacker's roll — bypasses Shields entirely
+        // and deals bonus damage. Applies to either side now that both roll.
+        public bool WasCriticalHit { get; }
+        public int Damage { get; }
+
+        // True when the player chose to Brace against an opponent attack
+        // (and had enough Energy to actually do so). Opponents have no
+        // equivalent — their Shields are never boosted when defending.
+        public bool DefenderBraced { get; }
+
         public RoundResult(
-            RoundAttacker attacker, int speedRoll, int speedTotal, int opponentSpeed,
-            int? attackRoll, int attackTotal, int defenderShields, bool hitLanded)
+            RoundAttacker attacker, int attackRoll, int attackTotal, int defenseRoll, int defenseTotal,
+            bool hitLanded, bool wasCriticalHit, int damage, bool defenderBraced)
         {
             Attacker = attacker;
-            SpeedRoll = speedRoll;
-            SpeedTotal = speedTotal;
-            OpponentSpeed = opponentSpeed;
             AttackRoll = attackRoll;
             AttackTotal = attackTotal;
-            DefenderShields = defenderShields;
+            DefenseRoll = defenseRoll;
+            DefenseTotal = defenseTotal;
             HitLanded = hitLanded;
+            WasCriticalHit = wasCriticalHit;
+            Damage = damage;
+            DefenderBraced = defenderBraced;
         }
     }
 }

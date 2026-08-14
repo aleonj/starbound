@@ -4,14 +4,19 @@ namespace StarBound.Combat
     {
         public int Roll { get; }
         public int Total { get; }
-        public int OpponentSpeed { get; }
+
+        // The opponent now rolls too — a contested d10+Speed check, rather
+        // than the player's roll vs. a flat Speed stat.
+        public int OpponentRoll { get; }
+        public int OpponentTotal { get; }
         public bool Success { get; }
 
-        public EscapeAttemptResult(int roll, int total, int opponentSpeed, bool success)
+        public EscapeAttemptResult(int roll, int total, int opponentRoll, int opponentTotal, bool success)
         {
             Roll = roll;
             Total = total;
-            OpponentSpeed = opponentSpeed;
+            OpponentRoll = opponentRoll;
+            OpponentTotal = opponentTotal;
             Success = success;
         }
     }

@@ -164,8 +164,12 @@ namespace StarBound.Demo
             }
             GUI.enabled = true;
 
-            if (!match.CanShop)
-                GUILayout.Label("Market closed — already had an engagement this turn.");
+            if (match.IsCurrentPlayerOnPlanet && !match.CanShop)
+            {
+                GUILayout.Label(match.CurrentHand == null
+                    ? "Roll dice before entering the market."
+                    : "Market closed — already had an engagement this turn.");
+            }
 
             if (showShop && canShopHere)
                 DrawShopPanel();
@@ -173,6 +177,18 @@ namespace StarBound.Demo
                 showShop = false;
 
             GUILayout.Space(10);
+
+            if (match.CanAttackOpponent)
+            {
+                GUILayout.Label($"{match.OtherPlayer.DisplayName} is here.");
+                if (GUILayout.Button($"Attack {match.OtherPlayer.DisplayName}"))
+                {
+                    match.AttackOpponent();
+                    lastMessage = null;
+                    combatLog.Clear();
+                }
+                GUILayout.Space(10);
+            }
 
             GUI.enabled = match.CanEndTurn;
             if (GUILayout.Button("End Turn"))
@@ -185,9 +201,6 @@ namespace StarBound.Demo
                 RefreshView();
             }
             GUI.enabled = true;
-
-            if (match.MustMoveAfterEscape)
-                GUILayout.Label("You must move to an adjacent hex after escaping before ending your turn.");
 
             if (lastMessage != null)
                 GUILayout.Label(lastMessage);
@@ -233,11 +246,13 @@ namespace StarBound.Demo
         {
             var session = match.ActiveEngagement;
 
-            GUILayout.Label($"Engagement ({session.Definition.Tier})", headerStyle);
+            var header = session.IsPvP ? $"PvP Engagement — vs {match.OtherPlayer.DisplayName}" : $"Engagement ({session.Definition.Tier})";
+            GUILayout.Label(header, headerStyle);
 
+            var opponentLabel = session.IsPvP ? match.OtherPlayer.DisplayName : "Opponent";
             var opponentView = new OpponentStatView(session.Opponent);
             GUILayout.Label(
-                $"Opponent — Hull {opponentView.Hull}  Weapons {opponentView.Weapons}  " +
+                $"{opponentLabel} — Hull {opponentView.Hull}  Weapons {opponentView.Weapons}  " +
                 $"Shields {opponentView.Shields}  Speed {opponentView.Speed}");
 
             GUILayout.Space(5);
@@ -247,20 +262,49 @@ namespace StarBound.Demo
             {
                 GUILayout.Space(10);
 
-                GUI.enabled = session.CanAttemptEscape;
-                if (GUILayout.Button("Attempt Escape"))
+                if (!session.IsAwaitingAttackResolution)
                 {
-                    var result = session.AttemptEscape(rng);
-                    combatLog.Add(result.Success
-                        ? $"Escape: rolled {result.Roll} = {result.Total} vs {result.OpponentSpeed} — escaped!"
-                        : $"Escape: rolled {result.Roll} = {result.Total} vs {result.OpponentSpeed} — failed, lost 1 Energy.");
-                }
-                GUI.enabled = true;
+                    GUI.enabled = session.CanAttemptEscape;
+                    if (GUILayout.Button("Attempt Escape"))
+                    {
+                        var result = session.AttemptEscape(rng);
+                        combatLog.Add(DescribeEscape(result));
+                    }
+                    GUI.enabled = true;
 
-                if (GUILayout.Button("Resolve Round"))
+                    if (session.Outcome == EngagementOutcome.InProgress && GUILayout.Button("Roll Initiative"))
+                    {
+                        var initiative = session.ResolveInitiative(rng);
+                        combatLog.Add(DescribeInitiative(initiative));
+                    }
+                }
+                else if (session.PendingAttacker == RoundAttacker.Opponent)
                 {
-                    var result = session.ResolveRound(rng);
-                    combatLog.Add(DescribeRound(result));
+                    GUILayout.Label("Opponent has the initiative — brace for impact?");
+
+                    var canBrace = session.PlayerShip.GetStat(CoreStat.Energy) > 0;
+                    GUI.enabled = canBrace;
+                    if (GUILayout.Button($"Brace (-{CombatResolver.BraceEnergyCost} Energy, +{CombatResolver.BraceShieldBonus} Shields)"))
+                    {
+                        var result = session.ResolveAttack(rng, wantsBrace: true);
+                        combatLog.Add(DescribeAttack(result));
+                    }
+                    GUI.enabled = true;
+
+                    if (GUILayout.Button("Hold"))
+                    {
+                        var result = session.ResolveAttack(rng, wantsBrace: false);
+                        combatLog.Add(DescribeAttack(result));
+                    }
+                }
+                else
+                {
+                    GUILayout.Label("You have the initiative!");
+                    if (GUILayout.Button("Attack"))
+                    {
+                        var result = session.ResolveAttack(rng);
+                        combatLog.Add(DescribeAttack(result));
+                    }
                 }
             }
             else
@@ -269,9 +313,18 @@ namespace StarBound.Demo
                 GUILayout.Label($"Outcome: {session.Outcome}", headerStyle);
                 if (GUILayout.Button("Continue"))
                 {
-                    match.ResolveActiveEngagement();
+                    var wasEscape = session.Outcome == EngagementOutcome.PlayerEscaped;
+                    var previousPosition = match.CurrentPlayer.Position;
+
+                    match.ResolveActiveEngagement(rng);
                     combatLog.Clear();
-                    lastMessage = null;
+
+                    lastMessage = wasEscape
+                        ? (match.CurrentPlayer.Position != previousPosition
+                            ? $"Escaped — carried to {match.CurrentPlayer.Position}."
+                            : "Escaped — but nowhere safe nearby to be carried to.")
+                        : null;
+
                     RefreshView();
                 }
             }
@@ -287,19 +340,32 @@ namespace StarBound.Demo
             GUILayout.Label($"{match.Winner.DisplayName} wins the match!", headerStyle);
         }
 
-        private static string DescribeRound(RoundResult result)
+        private static string DescribeEscape(EscapeAttemptResult result) =>
+            result.Success
+                ? $"Escape: you rolled {result.Roll} = {result.Total}, opponent rolled {result.OpponentRoll} = {result.OpponentTotal} — escaped!"
+                : $"Escape: you rolled {result.Roll} = {result.Total}, opponent rolled {result.OpponentRoll} = {result.OpponentTotal} — failed, lost 1 Energy.";
+
+        private static string DescribeInitiative(InitiativeResult result)
         {
-            var speedLine =
-                $"Speed: rolled {result.SpeedRoll} = {result.SpeedTotal} vs {result.OpponentSpeed} — " +
+            var fumble = result.WasPlayerCriticalFailure ? " (natural 1 — critical failure!)" : "";
+            return $"Speed: you rolled {result.PlayerSpeedRoll} = {result.PlayerSpeedTotal}, " +
+                $"opponent rolled {result.OpponentSpeedRoll} = {result.OpponentSpeedTotal}{fumble} — " +
                 (result.Attacker == RoundAttacker.Player ? "you attack." : "opponent attacks.");
+        }
 
-            var attackLine = result.Attacker == RoundAttacker.Player
-                ? $"Weapons: rolled {result.AttackRoll} = {result.AttackTotal} vs Shields {result.DefenderShields} — " +
-                  (result.HitLanded ? "opponent lost 1 Hull." : "missed.")
-                : $"Weapons: {result.AttackTotal} vs Shields {result.DefenderShields} — " +
-                  (result.HitLanded ? "you lost 1 Hull." : "missed.");
+        private static string DescribeAttack(RoundResult result)
+        {
+            if (result.Attacker == RoundAttacker.Player)
+            {
+                var crit = result.WasCriticalHit ? " CRITICAL HIT!" : "";
+                return $"Weapons: you rolled {result.AttackRoll} = {result.AttackTotal}, opponent's Shields rolled {result.DefenseRoll} = {result.DefenseTotal} — " +
+                    (result.HitLanded ? $"opponent lost {result.Damage} Hull.{crit}" : "missed.");
+            }
 
-            return $"{speedLine} {attackLine}";
+            var opponentCrit = result.WasCriticalHit ? " CRITICAL HIT!" : "";
+            var braceNote = result.DefenderBraced ? " (braced)" : "";
+            return $"Weapons: opponent rolled {result.AttackRoll} = {result.AttackTotal}, your Shields rolled {result.DefenseRoll} = {result.DefenseTotal}{braceNote} — " +
+                (result.HitLanded ? $"you lost {result.Damage} Hull.{opponentCrit}" : "missed.");
         }
 
         private void CreateShipMarkers()
