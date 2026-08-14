@@ -13,7 +13,9 @@ namespace StarBound.Multiplayer
     {
         private DiceHand currentHand;
         private EngagementSession activeEngagement;
+        private bool hasMovedThisTurn;
         private bool mustMoveAfterEscape;
+        private bool hadEngagementThisTurn;
 
         public GameMap Map { get; }
         public Player PlayerOne { get; }
@@ -31,9 +33,23 @@ namespace StarBound.Multiplayer
 
         public DiceHand CurrentHand => currentHand;
         public EngagementSession ActiveEngagement => activeEngagement;
-        public bool IsInEngagement => activeEngagement != null && activeEngagement.Outcome == EngagementOutcome.InProgress;
+
+        // True from the moment an engagement starts until it's explicitly
+        // resolved via ResolveActiveEngagement — deliberately NOT tied to
+        // the session's Outcome still being InProgress, so that a decided
+        // but unacknowledged outcome (win/loss/escape) still blocks other
+        // actions until the caller finalizes it.
+        public bool IsInEngagement => activeEngagement != null;
         public bool IsComplete => Winner != null;
         public bool MustMoveAfterEscape => mustMoveAfterEscape;
+
+        public bool CanMove =>
+            !IsInEngagement && !IsComplete && currentHand != null && (!hasMovedThisTurn || mustMoveAfterEscape);
+
+        // Blocked for the rest of the turn once an engagement has happened,
+        // even if a later forced move (e.g. after escaping) lands on a
+        // planet/starport.
+        public bool CanShop => !IsInEngagement && !IsComplete && !hadEngagementThisTurn;
 
         public DiceHand RollDice(Random rng)
         {
@@ -47,6 +63,9 @@ namespace StarBound.Multiplayer
             return currentHand;
         }
 
+        // Only one voluntary movement is allowed per turn — the exception
+        // is the mandatory move after a successful escape, which is still
+        // permitted even though the turn's movement was already used.
         public MoveResult Move(RolledDie die, HexCoordinate to, Random rng)
         {
             EnsureMatchInProgress();
@@ -54,12 +73,15 @@ namespace StarBound.Multiplayer
                 throw new InvalidOperationException("Can't move mid-engagement.");
             if (currentHand == null)
                 throw new InvalidOperationException("Roll dice before moving.");
+            if (hasMovedThisTurn && !mustMoveAfterEscape)
+                throw new InvalidOperationException("Only one movement is allowed per turn.");
 
             var result = ShipMover.TryMove(Map, die, CurrentPlayer.Position, to);
             if (!result.Success)
                 return result;
 
             CurrentPlayer.Position = result.NewPosition;
+            hasMovedThisTurn = true;
             mustMoveAfterEscape = false;
 
             var session = EngagementTrigger.TryTrigger(CurrentPlayer, Map, rng);
@@ -77,6 +99,7 @@ namespace StarBound.Multiplayer
                 throw new InvalidOperationException("There's no resolved engagement to finalize.");
 
             EngagementTrigger.ClearMarker(Map, CurrentPlayer.Position);
+            hadEngagementThisTurn = true;
 
             if (activeEngagement.Outcome == EngagementOutcome.PlayerLost)
             {
@@ -84,9 +107,10 @@ namespace StarBound.Multiplayer
             }
             else if (activeEngagement.Outcome == EngagementOutcome.PlayerEscaped)
             {
-                // If no dice remain to move with, waive the requirement —
-                // the source rules don't address this edge case.
-                mustMoveAfterEscape = currentHand != null && currentHand.HasUnspentDice;
+                // Waive the requirement if there's no unspent die that can
+                // actually reach a legal adjacent hex — otherwise the
+                // player could be stuck unable to end their turn.
+                mustMoveAfterEscape = HasAnyLegalMove();
             }
 
             if (CurrentPlayer.HasWonMatch)
@@ -106,7 +130,29 @@ namespace StarBound.Multiplayer
                 throw new InvalidOperationException("Must move to an adjacent hex after escaping before ending turn.");
 
             currentHand = null; // unspent dice are discarded, no carryover
+            hasMovedThisTurn = false;
+            hadEngagementThisTurn = false;
             CurrentPlayer = CurrentPlayer == PlayerOne ? PlayerTwo : PlayerOne;
+        }
+
+        private bool HasAnyLegalMove()
+        {
+            if (currentHand == null)
+                return false;
+
+            foreach (var die in currentHand.UnspentDice)
+            {
+                foreach (var neighbor in Map.GetNeighborCoordinates(CurrentPlayer.Position))
+                {
+                    if (Map.TryGetHex(neighbor, out var hex) &&
+                        (hex.Terrain == die.Terrain || hex.Terrain == TerrainType.PlanetOrStarport))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private void EnsureMatchInProgress()

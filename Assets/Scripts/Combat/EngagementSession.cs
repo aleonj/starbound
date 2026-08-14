@@ -4,13 +4,11 @@ using StarBound.Core;
 namespace StarBound.Combat
 {
     // Drives one engagement round by round. A round is: optional escape
-    // attempt (if it fails, the round continues as normal), then the
-    // attribute check for the round's current attribute, then the round
-    // advances to the next attribute in the cycle. Escape can only be
-    // attempted once per round.
+    // attempt (if it fails, the round continues as normal), then a Speed
+    // check to decide the attacker, then that attacker's Weapons vs. the
+    // defender's Shields. Escape can only be attempted once per round.
     public class EngagementSession
     {
-        private int roundIndex;
         private bool hasAttemptedEscapeThisRound;
 
         public EngagementDefinition Definition { get; }
@@ -25,8 +23,6 @@ namespace StarBound.Combat
             Player = player;
             Opponent = opponent;
         }
-
-        public CoreStat CurrentAttribute => Definition.RoundOrder[roundIndex % Definition.RoundOrder.Count];
 
         public bool CanAttemptEscape =>
             Outcome == EngagementOutcome.InProgress && Definition.EscapeAllowed && !hasAttemptedEscapeThisRound;
@@ -45,13 +41,12 @@ namespace StarBound.Combat
             return result;
         }
 
-        public AttributeCheckResult ResolveRound(Random rng)
+        public RoundResult ResolveRound(Random rng)
         {
             if (Outcome != EngagementOutcome.InProgress)
                 throw new InvalidOperationException("This engagement has already ended.");
 
-            var attribute = CurrentAttribute;
-            var result = CombatResolver.ResolveAttributeCheck(PlayerShip, Opponent, attribute, rng);
+            var result = CombatResolver.ResolveRound(PlayerShip, Opponent, rng);
 
             if (Opponent.GetStat(CoreStat.Hull) <= 0)
             {
@@ -64,7 +59,6 @@ namespace StarBound.Combat
             }
             else
             {
-                roundIndex++;
                 hasAttemptedEscapeThisRound = false;
             }
 

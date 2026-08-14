@@ -18,16 +18,6 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void DefaultRoundOrder_IsWeaponsShieldsSpeed()
-        {
-            var definition = EngagementDefinitionTable.For(EngagementTier.Medium);
-
-            CollectionAssert.AreEqual(
-                new[] { CoreStat.Weapons, CoreStat.Shields, CoreStat.Speed },
-                definition.RoundOrder);
-        }
-
-        [Test]
         public void EscapeAllowed_DefaultsTrue()
         {
             var definition = EngagementDefinitionTable.For(EngagementTier.Hard);

@@ -17,27 +17,6 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void CurrentAttribute_CyclesThroughRoundOrder()
-        {
-            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
-            var player = CreatePlayer();
-            BoostAllPerformanceStats(player.Ship, 20); // player always wins every exchange
-            var opponent = new Ship(cargoCapacity: 0);
-            opponent.ApplyStatDelta(CoreStat.Hull, 20); // survives a few hits so the fight doesn't end early
-
-            var session = new EngagementSession(definition, player, opponent);
-            var rng = new Random(1);
-
-            Assert.AreEqual(CoreStat.Weapons, session.CurrentAttribute);
-            session.ResolveRound(rng);
-            Assert.AreEqual(CoreStat.Shields, session.CurrentAttribute);
-            session.ResolveRound(rng);
-            Assert.AreEqual(CoreStat.Speed, session.CurrentAttribute);
-            session.ResolveRound(rng);
-            Assert.AreEqual(CoreStat.Weapons, session.CurrentAttribute); // cycles back
-        }
-
-        [Test]
         public void ResolveRound_OpponentHullReachesZero_PlayerWinsAndRecordsTierWin()
         {
             var definition = EngagementDefinitionTable.For(EngagementTier.Hard);

@@ -36,7 +36,6 @@ namespace StarBound.Tests
         [TestCase(TerrainType.Asteroids)]
         [TestCase(TerrainType.Mines)]
         [TestCase(TerrainType.Debris)]
-        [TestCase(TerrainType.Tradelane)]
         public void Generate_NeverPlacesAnIsolatedSingleHexForClusterTerrain(TerrainType terrain)
         {
             var map = MapGenerator.Generate(radius: 6, Difficulty.Hard, seed: 7);
@@ -62,6 +61,41 @@ namespace StarBound.Tests
                 h.Terrain == TerrainType.Asteroids || h.Terrain == TerrainType.Mines || h.Terrain == TerrainType.Debris);
 
             Assert.Greater(HazardCount(hardMap), HazardCount(easyMap));
+        }
+
+        [Test]
+        public void Generate_EveryTradelaneHexBordersAnotherTradelaneOrAPlanet()
+        {
+            // Route length is now distance-driven rather than randomized,
+            // so a single connecting hex between two close planets is
+            // valid — the invariant is "borders the route/destination",
+            // not "is part of a cluster of 2+".
+            var map = MapGenerator.Generate(radius: 6, Difficulty.Medium, seed: 3);
+
+            var tradelaneHexes = map.Hexes.Where(h => h.Terrain == TerrainType.Tradelane).ToList();
+
+            foreach (var hex in tradelaneHexes)
+            {
+                var bordersRouteOrPlanet = map.GetNeighborCoordinates(hex.Coordinate)
+                    .Any(c => map.TryGetHex(c, out var neighbor) &&
+                        (neighbor.Terrain == TerrainType.Tradelane || neighbor.Terrain == TerrainType.PlanetOrStarport));
+
+                Assert.IsTrue(bordersRouteOrPlanet, $"Tradelane hex at {hex.Coordinate} borders neither a tradelane nor a planet.");
+            }
+        }
+
+        [Test]
+        public void Generate_WithMultiplePlanets_BuildsAtLeastOneTradelaneRoute()
+        {
+            // Radius 8 + Easy (high tradelane budget, low hazard density)
+            // reliably produces enough planets and open space to connect.
+            var map = MapGenerator.Generate(radius: 8, Difficulty.Easy, seed: 11);
+
+            var planetCount = map.Hexes.Count(h => h.Terrain == TerrainType.PlanetOrStarport);
+            var tradelaneCount = map.Hexes.Count(h => h.Terrain == TerrainType.Tradelane);
+
+            Assert.GreaterOrEqual(planetCount, 2, "Test assumption failed: expected at least 2 planets for this seed.");
+            Assert.Greater(tradelaneCount, 0);
         }
     }
 }
