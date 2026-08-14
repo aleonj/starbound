@@ -20,7 +20,7 @@ namespace StarBound.Movement
             new(TerrainType.ClearSpace, TerrainType.ClearSpace, TerrainType.Tradelane, TerrainType.Asteroids, TerrainType.Asteroids, TerrainType.Mines),
             new(TerrainType.ClearSpace, TerrainType.Tradelane, TerrainType.Tradelane, TerrainType.Asteroids, TerrainType.Debris, TerrainType.Wormhole),
             new(TerrainType.ClearSpace, TerrainType.Tradelane, TerrainType.Asteroids, TerrainType.Debris, TerrainType.Mines, TerrainType.Wormhole),
-            new(TerrainType.ClearSpace, TerrainType.ClearSpace, TerrainType.Tradelane, TerrainType.Debris, TerrainType.Mines, TerrainType.Wormhole),
+            new(TerrainType.ClearSpace, TerrainType.ClearSpace, TerrainType.ClearSpace, TerrainType.Tradelane, TerrainType.Debris, TerrainType.Mines),
         };
     }
 }

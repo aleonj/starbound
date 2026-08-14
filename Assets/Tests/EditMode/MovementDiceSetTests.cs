@@ -46,6 +46,15 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void Wormhole_AppearsOnAtMostTwoDice()
+        {
+            var diceWithWormhole = MovementDiceSet.Dice.Count(die =>
+                Enumerable.Range(1, 6).Select(die.FaceAt).Contains(TerrainType.Wormhole));
+
+            Assert.LessOrEqual(diceWithWormhole, 2, "Wormhole should be rare — on at most 2 of the 5 dice.");
+        }
+
+        [Test]
         public void Dice_AreNotAllIdentical()
         {
             var faceSets = MovementDiceSet.Dice

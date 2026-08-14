@@ -24,6 +24,18 @@ namespace StarBound.Tests
             return (new Match(map, p1, p2), p1, p2);
         }
 
+        private static (Match match, Player p1) BuildPlanetContinuationMatch()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.PlanetOrStarport)); // adjacent to origin
+            map.SetHex(new Hex(new HexCoordinate(2, 0), TerrainType.ClearSpace)); // adjacent to the planet
+
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+
+            return (new Match(map, p1, p2), p1);
+        }
+
         [Test]
         public void Move_SecondVoluntaryMoveInSameTurn_Throws()
         {
@@ -266,6 +278,50 @@ namespace StarBound.Tests
             match.EndTurn();
 
             Assert.IsTrue(match.CanShop);
+        }
+
+        [Test]
+        public void Move_OntoPlanetWithNoEngagement_LeavesMovementOpen()
+        {
+            var (match, _) = BuildPlanetContinuationMatch();
+            match.RollDice(new Random(1));
+
+            var result = match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsTrue(result.Success);
+            Assert.IsTrue(match.CanMove);
+            Assert.DoesNotThrow(() =>
+                match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1)));
+        }
+
+        [Test]
+        public void Move_OntoOrdinaryTerrainAfterPlanet_LocksMovement()
+        {
+            var (match, _) = BuildPlanetContinuationMatch();
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1));
+
+            Assert.IsFalse(match.CanMove);
+            Assert.Throws<InvalidOperationException>(() =>
+                match.Move(new RolledDie(2, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1)));
+        }
+
+        [Test]
+        public void EnterMarket_LocksMovementForRestOfTurn()
+        {
+            var (match, _) = BuildPlanetContinuationMatch();
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsTrue(match.CanMove);
+
+            match.EnterMarket();
+
+            Assert.IsFalse(match.CanMove);
+            Assert.Throws<InvalidOperationException>(() =>
+                match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1)));
+            Assert.IsTrue(match.CanEndTurn);
         }
     }
 }

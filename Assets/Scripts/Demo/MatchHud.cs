@@ -123,7 +123,9 @@ namespace StarBound.Demo
             }
             else if (match.CanMove)
             {
-                GUILayout.Label("Dice — pick one, then click a highlighted hex on the map:");
+                GUILayout.Label(match.IsCurrentPlayerOnPlanet
+                    ? "Docked — pick a die to keep traveling, or enter the market to stop:"
+                    : "Dice — pick one, then click a highlighted hex on the map:");
                 foreach (var die in match.CurrentHand.Dice)
                 {
                     if (die.IsSpent)
@@ -149,13 +151,16 @@ namespace StarBound.Demo
 
             GUILayout.Space(10);
 
-            var canShopHere = IsCurrentPlayerOnPlanet() && match.CanShop;
+            var canShopHere = match.IsCurrentPlayerOnPlanet && match.CanShop;
             GUI.enabled = canShopHere;
             if (GUILayout.Button(showShop ? "Close Shop" : "Open Shop"))
             {
                 showShop = !showShop;
                 if (showShop)
+                {
+                    match.EnterMarket();
                     shopOffer = ShopOfferGenerator.GenerateOffer(rng);
+                }
             }
             GUI.enabled = true;
 
@@ -296,9 +301,6 @@ namespace StarBound.Demo
 
             return $"{speedLine} {attackLine}";
         }
-
-        private bool IsCurrentPlayerOnPlanet() =>
-            match.Map.TryGetHex(match.CurrentPlayer.Position, out var hex) && hex.Terrain == TerrainType.PlanetOrStarport;
 
         private void CreateShipMarkers()
         {

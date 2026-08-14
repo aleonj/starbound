@@ -51,6 +51,9 @@ namespace StarBound.Multiplayer
         // planet/starport.
         public bool CanShop => !IsInEngagement && !IsComplete && !hadEngagementThisTurn;
 
+        public bool IsCurrentPlayerOnPlanet =>
+            Map.TryGetHex(CurrentPlayer.Position, out var hex) && hex.Terrain == TerrainType.PlanetOrStarport;
+
         public DiceHand RollDice(Random rng)
         {
             EnsureMatchInProgress();
@@ -63,9 +66,12 @@ namespace StarBound.Multiplayer
             return currentHand;
         }
 
-        // Only one voluntary movement is allowed per turn — the exception
-        // is the mandatory move after a successful escape, which is still
-        // permitted even though the turn's movement was already used.
+        // Only one voluntary movement is allowed per turn — with two
+        // exceptions: the mandatory move after a successful escape, and
+        // landing on a planet/starport (with no engagement on it), which
+        // leaves movement open so the player can choose to keep traveling
+        // instead of stopping. Landing on an engagement hex always ends
+        // movement immediately, no choice.
         public MoveResult Move(RolledDie die, HexCoordinate to, Random rng)
         {
             EnsureMatchInProgress();
@@ -81,14 +87,33 @@ namespace StarBound.Multiplayer
                 return result;
 
             CurrentPlayer.Position = result.NewPosition;
-            hasMovedThisTurn = true;
             mustMoveAfterEscape = false;
 
             var session = EngagementTrigger.TryTrigger(CurrentPlayer, Map, rng);
             if (session != null)
+            {
                 activeEngagement = session;
+                hasMovedThisTurn = true;
+            }
+            else if (!IsCurrentPlayerOnPlanet)
+            {
+                hasMovedThisTurn = true;
+            }
+            // else: landed on a planet with no engagement — movement stays
+            // open until the player chooses to enter the market.
 
             return result;
+        }
+
+        // Choosing to shop ends movement for the rest of the turn, same as
+        // landing anywhere else that isn't a planet/starport.
+        public void EnterMarket()
+        {
+            EnsureMatchInProgress();
+            if (IsInEngagement)
+                throw new InvalidOperationException("Can't enter the market mid-engagement.");
+
+            hasMovedThisTurn = true;
         }
 
         // Call once ActiveEngagement.Outcome has left InProgress, to clear
