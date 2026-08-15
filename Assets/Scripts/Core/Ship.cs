@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace StarBound.Core
 {
@@ -34,7 +35,16 @@ namespace StarBound.Core
             Money = startingMoney;
         }
 
-        public int GetStat(CoreStat stat) => stats[stat];
+        // Base value plus the live bonus from any held Permanent items
+        // affecting this stat — a Permanent item's effect only applies
+        // while it's actually held, so selling/trading it away removes
+        // the bonus immediately. Consumables never contribute here; their
+        // effect is folded into the base stat (via ApplyStatDelta) at the
+        // moment they're used, not while merely held.
+        public int GetStat(CoreStat stat) =>
+            stats[stat] + heldItems
+                .Where(item => item.Kind == ItemKind.Permanent && item.AffectedStat == stat)
+                .Sum(item => item.StatDelta);
 
         public void ApplyStatDelta(CoreStat stat, int delta)
         {
@@ -73,6 +83,33 @@ namespace StarBound.Core
 
             heldItems.Add(item);
             return true;
+        }
+
+        // Used for selling and trading — removing a Permanent item drops
+        // its live GetStat bonus immediately, since that bonus is computed
+        // from HeldItems rather than baked into the base stat.
+        public bool TryRemoveItem(ItemDefinition item) => heldItems.Remove(item);
+
+        // Permanently folds the item's effect into the base stat and
+        // destroys it — unlike a Permanent item, a used Consumable can't
+        // be resold or traded afterward, since it's no longer held.
+        public void UseConsumableItem(ItemDefinition item)
+        {
+            if (item.Kind != ItemKind.Consumable)
+                throw new ArgumentException("Only Consumable items can be used.", nameof(item));
+            if (!heldItems.Remove(item))
+                throw new InvalidOperationException("This item isn't held.");
+
+            ApplyStatDelta(item.AffectedStat, item.StatDelta);
+        }
+
+        // Floors at zero, same convention as ApplyStatDelta — used for
+        // the bounty-job escape penalty.
+        public void ApplyMoneyPenalty(int amount)
+        {
+            if (amount < 0)
+                throw new ArgumentOutOfRangeException(nameof(amount));
+            Money = Math.Max(0, Money - amount);
         }
 
         // [Combat] Zero Hull/Energy penalty: clear money & items on relocation.

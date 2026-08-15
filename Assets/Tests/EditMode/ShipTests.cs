@@ -1,3 +1,4 @@
+using System;
 using NUnit.Framework;
 using StarBound.Core;
 
@@ -109,6 +110,92 @@ namespace StarBound.Tests
 
             Assert.AreEqual(0, ship.Money);
             Assert.AreEqual(0, ship.HeldItems.Count);
+        }
+
+        [Test]
+        public void GetStat_ReflectsHeldPermanentItemsLive()
+        {
+            var ship = new Ship(cargoCapacity: 2);
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 2, 100, ItemKind.Permanent);
+
+            ship.TryAddItem(item);
+            Assert.AreEqual(5, ship.GetStat(CoreStat.Weapons)); // 3 base + 2
+
+            ship.TryRemoveItem(item);
+            Assert.AreEqual(3, ship.GetStat(CoreStat.Weapons)); // bonus gone once removed
+        }
+
+        [Test]
+        public void GetStat_IgnoresHeldConsumablesUntilUsed()
+        {
+            var ship = new Ship(cargoCapacity: 2);
+            var item = new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 100, ItemKind.Consumable);
+
+            ship.TryAddItem(item);
+
+            Assert.AreEqual(3, ship.GetStat(CoreStat.Hull)); // unused consumable contributes nothing
+        }
+
+        [Test]
+        public void UseConsumableItem_AppliesDeltaToBaseAndRemovesItem()
+        {
+            var ship = new Ship(cargoCapacity: 2);
+            var item = new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 100, ItemKind.Consumable);
+            ship.ApplyStatDelta(CoreStat.Hull, -2); // Hull = 1
+            ship.TryAddItem(item);
+
+            ship.UseConsumableItem(item);
+
+            Assert.AreEqual(3, ship.GetStat(CoreStat.Hull)); // 1 base + 2, capped by nothing here
+            Assert.AreEqual(0, ship.HeldItems.Count);
+        }
+
+        [Test]
+        public void UseConsumableItem_ThrowsForPermanentItem()
+        {
+            var ship = new Ship(cargoCapacity: 2);
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            ship.TryAddItem(item);
+
+            Assert.Throws<ArgumentException>(() => ship.UseConsumableItem(item));
+        }
+
+        [Test]
+        public void UseConsumableItem_ThrowsWhenNotHeld()
+        {
+            var ship = new Ship(cargoCapacity: 2);
+            var item = new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 100, ItemKind.Consumable);
+
+            Assert.Throws<InvalidOperationException>(() => ship.UseConsumableItem(item));
+        }
+
+        [Test]
+        public void TryRemoveItem_FailsWhenNotHeld()
+        {
+            var ship = new Ship(cargoCapacity: 2);
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50);
+
+            Assert.IsFalse(ship.TryRemoveItem(item));
+        }
+
+        [Test]
+        public void ApplyMoneyPenalty_DeductsAmount()
+        {
+            var ship = new Ship(cargoCapacity: 2, startingMoney: 50);
+
+            ship.ApplyMoneyPenalty(20);
+
+            Assert.AreEqual(30, ship.Money);
+        }
+
+        [Test]
+        public void ApplyMoneyPenalty_FloorsAtZero()
+        {
+            var ship = new Ship(cargoCapacity: 2, startingMoney: 10);
+
+            ship.ApplyMoneyPenalty(50);
+
+            Assert.AreEqual(0, ship.Money);
         }
     }
 }

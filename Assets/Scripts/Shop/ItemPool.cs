@@ -3,11 +3,13 @@ using StarBound.Core;
 
 namespace StarBound.Shop
 {
-    // The full pool of purchasable items. Only affects Performance stats
-    // (Weapons/Shields/Speed) — Integrity stats (Hull/Energy) are handled
-    // exclusively via RepairService, matching the spec's separate
-    // "augment a stat via items" vs. "restore integrity" offerings.
-    // Placeholder content/magnitudes, easy to extend.
+    // The full pool of purchasable items. Permanent upgrades only affect
+    // Performance stats (Weapons/Shields/Speed) — restoring Integrity
+    // stats (Hull/Energy) permanently is RepairService's job, not an
+    // item's. Consumables are the exception: a one-time repair kit is a
+    // Consumable specifically because its effect is a single use, not a
+    // standing item-driven ceiling on Hull. Placeholder content/magnitudes,
+    // easy to extend.
     public static class ItemPool
     {
         public static readonly IReadOnlyList<ItemDefinition> Items = BuildPool();
@@ -21,9 +23,12 @@ namespace StarBound.Shop
                 foreach (var delta in new[] { 1, 2 })
                 {
                     var name = $"{DescribeStat(stat)} Upgrade +{delta}";
-                    items.Add(new ItemDefinition(name, stat, delta, ItemPricing.CalculatePrice(delta)));
+                    items.Add(new ItemDefinition(name, stat, delta, ItemPricing.CalculatePrice(delta), ItemKind.Permanent));
                 }
             }
+
+            items.Add(new ItemDefinition("Repair Kit", CoreStat.Hull, 2, ItemPricing.CalculatePrice(2), ItemKind.Consumable));
+            items.Add(new ItemDefinition("Energy Cell", CoreStat.Energy, 2, ItemPricing.CalculatePrice(2), ItemKind.Consumable));
 
             return items;
         }

@@ -17,6 +17,18 @@ namespace StarBound.Core
 
         public bool HasWonMatch => HardEngagementWins >= HardWinsToVictory;
 
+        // One job at a time — a separate slot from Ship's item cargo,
+        // tracking whichever mining/transport/bounty contract the player
+        // has accepted from a job board.
+        public JobDefinition ActiveJob { get; private set; }
+
+        // Mining jobs are two steps, not just a delivery: the ore has to
+        // actually be mined at an Asteroids field before it can be
+        // delivered. Tracked here rather than on JobDefinition itself,
+        // since JobDefinition is an immutable spec and this is progress
+        // toward completing it.
+        public bool HasMinedCargo { get; private set; }
+
         public Player(string id, string displayName, Ship ship)
         {
             if (string.IsNullOrWhiteSpace(id))
@@ -45,6 +57,29 @@ namespace StarBound.Core
                 default:
                     throw new ArgumentOutOfRangeException(nameof(tier), "Cannot record a win for EngagementTier.None.");
             }
+        }
+
+        public void AcceptJob(JobDefinition job)
+        {
+            if (ActiveJob != null)
+                throw new InvalidOperationException("Already have an active job.");
+
+            ActiveJob = job ?? throw new ArgumentNullException(nameof(job));
+            HasMinedCargo = false;
+        }
+
+        public void ClearActiveJob()
+        {
+            ActiveJob = null;
+            HasMinedCargo = false;
+        }
+
+        public void MarkCargoMined()
+        {
+            if (ActiveJob is not { Type: JobType.Mining })
+                throw new InvalidOperationException("No active Mining job to mine cargo for.");
+
+            HasMinedCargo = true;
         }
     }
 }

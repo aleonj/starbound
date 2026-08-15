@@ -489,5 +489,262 @@ namespace StarBound.Tests
             Assert.IsTrue(match.CanShop);
             Assert.DoesNotThrow(() => match.EnterMarket());
         }
+
+        [Test]
+        public void UseItem_ConsumableUsableMidEngagement()
+        {
+            var (match, p1, _) = BuildMatch();
+            var item = new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 100, ItemKind.Consumable);
+            p1.Ship.TryAddItem(item);
+            p1.Ship.ApplyStatDelta(CoreStat.Hull, -2); // Hull = 1, so the effect is visible
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            Assert.IsTrue(match.IsInEngagement);
+            Assert.IsTrue(match.CanUseItem(item));
+
+            match.UseItem(item);
+
+            Assert.AreEqual(3, p1.Ship.GetStat(CoreStat.Hull));
+            Assert.AreEqual(0, p1.Ship.HeldItems.Count);
+        }
+
+        [Test]
+        public void CanUseItem_FalseForAPermanentItem()
+        {
+            var (match, p1, _) = BuildMatch();
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item);
+
+            Assert.IsFalse(match.CanUseItem(item));
+        }
+
+        [Test]
+        public void UseItem_ThrowsWhenNotHeld()
+        {
+            var (match, _, _) = BuildMatch();
+            var item = new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 100, ItemKind.Consumable);
+
+            Assert.Throws<InvalidOperationException>(() => match.UseItem(item));
+        }
+
+        [Test]
+        public void TradeItemToOpponent_TransfersItemAndPaysHalfPrice()
+        {
+            var (match, p1, p2) = BuildMatch(); // p1 and p2 share a hex
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item);
+            p2.Ship.AddMoney(100);
+
+            Assert.IsTrue(match.CanTradeWithOpponent(item));
+
+            match.TradeItemToOpponent(item);
+
+            Assert.AreEqual(0, p1.Ship.HeldItems.Count);
+            Assert.AreEqual(1, p2.Ship.HeldItems.Count);
+            Assert.AreEqual(25, p1.Ship.Money); // received half price
+            Assert.AreEqual(75, p2.Ship.Money); // paid half price
+        }
+
+        [Test]
+        public void CanTradeWithOpponent_FalseWhenOpponentCargoFull()
+        {
+            var (match, p1, p2) = BuildMatch();
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item);
+            for (var i = 0; i < p2.Ship.CargoCapacity; i++)
+                p2.Ship.TryAddItem(new ItemDefinition($"Filler {i}", CoreStat.Speed, 1, 10, ItemKind.Permanent));
+
+            Assert.IsFalse(match.CanTradeWithOpponent(item));
+        }
+
+        [Test]
+        public void CanTradeWithOpponent_FalseWhenOpponentCannotAfford()
+        {
+            var (match, p1, _) = BuildMatch();
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item); // p2 has 0 money by default
+
+            Assert.IsFalse(match.CanTradeWithOpponent(item));
+        }
+
+        [Test]
+        public void DeliverJob_AwardsRewardClearsJobAndLocksMovement()
+        {
+            var (match, p1, _) = BuildMatch();
+            var job = new JobDefinition(JobType.Transport, new HexCoordinate(2, 0), 60);
+            p1.AcceptJob(job);
+            p1.Position = new HexCoordinate(2, 0);
+
+            match.RollDice(new Random(1));
+
+            Assert.IsTrue(match.CanDeliverJob);
+
+            match.DeliverJob();
+
+            Assert.AreEqual(60, p1.Ship.Money);
+            Assert.IsNull(p1.ActiveJob);
+            Assert.IsFalse(match.CanMove);
+        }
+
+        [Test]
+        public void CanDeliverJob_FalseForABountyJobEvenAtTheDestinationHex()
+        {
+            var (match, p1, _) = BuildMatch();
+            var job = new JobDefinition(JobType.BountyHunting, new HexCoordinate(0, -1), 50, EngagementTier.Easy);
+            p1.AcceptJob(job);
+            p1.Position = new HexCoordinate(0, -1);
+            match.RollDice(new Random(1));
+
+            Assert.IsFalse(match.CanDeliverJob);
+        }
+
+        [Test]
+        public void CanMineAsteroid_TrueWhenOnAsteroidsWithAnUnminedMiningJob()
+        {
+            var map = new GameMap(radius: 2, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Asteroids));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.AcceptJob(new JobDefinition(JobType.Mining, new HexCoordinate(1, 0), 50));
+            match.RollDice(new Random(1));
+
+            Assert.IsTrue(match.CanMineAsteroid);
+        }
+
+        [Test]
+        public void CanMineAsteroid_FalseWhenNotOnAnAsteroidsHex()
+        {
+            var (match, p1, _) = BuildMatch(); // (0,0) is ClearSpace
+            p1.AcceptJob(new JobDefinition(JobType.Mining, new HexCoordinate(2, 0), 60));
+            match.RollDice(new Random(1));
+
+            Assert.IsFalse(match.CanMineAsteroid);
+        }
+
+        [Test]
+        public void MineAsteroid_SetsHasMinedCargoAndLocksMovement()
+        {
+            var map = new GameMap(radius: 2, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Asteroids));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.AcceptJob(new JobDefinition(JobType.Mining, new HexCoordinate(1, 0), 50));
+            match.RollDice(new Random(1));
+
+            match.MineAsteroid();
+
+            Assert.IsTrue(p1.HasMinedCargo);
+            Assert.IsFalse(match.CanMove);
+        }
+
+        [Test]
+        public void MineAsteroid_ThrowsWhenNotEligible()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.AcceptJob(new JobDefinition(JobType.Mining, new HexCoordinate(2, 0), 60));
+            match.RollDice(new Random(1));
+
+            Assert.Throws<InvalidOperationException>(() => match.MineAsteroid());
+        }
+
+        [Test]
+        public void CanDeliverJob_FalseForMiningJobUntilCargoIsMined()
+        {
+            var (match, p1, _) = BuildMatch();
+            var job = new JobDefinition(JobType.Mining, new HexCoordinate(2, 0), 60);
+            p1.AcceptJob(job);
+            p1.Position = new HexCoordinate(2, 0);
+            match.RollDice(new Random(1));
+
+            Assert.IsFalse(match.CanDeliverJob);
+
+            p1.MarkCargoMined();
+
+            Assert.IsTrue(match.CanDeliverJob);
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_BountyJobWon_AwardsRewardAndClearsJob()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.AcceptJob(new JobDefinition(JobType.BountyHunting, new HexCoordinate(0, -1), 200, EngagementTier.Easy));
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
+
+            Assert.AreEqual(EngagementOutcome.PlayerWon, match.ActiveEngagement.Outcome);
+
+            match.ResolveActiveEngagement(new Random(1));
+
+            Assert.AreEqual(200, p1.Ship.Money);
+            Assert.IsNull(p1.ActiveJob);
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_BountyJobEscaped_AppliesPenaltyAndClearsJob()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.AcceptJob(new JobDefinition(JobType.BountyHunting, new HexCoordinate(0, -1), 200, EngagementTier.Easy));
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape success
+            match.ActiveEngagement.AttemptEscape(new Random(1));
+
+            Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome);
+
+            match.ResolveActiveEngagement(new Random(1));
+
+            Assert.AreEqual(0, p1.Ship.Money); // started at 0, penalty floors at 0 rather than going negative
+            Assert.IsNull(p1.ActiveJob);
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_BountyJobLost_ClearsJobWithNoExtraPenalty()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.AcceptJob(new JobDefinition(JobType.BountyHunting, new HexCoordinate(0, -1), 200, EngagementTier.Easy));
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            var opponent = match.ActiveEngagement.Opponent;
+            opponent.ApplyStatDelta(CoreStat.Weapons, 20);
+            opponent.ApplyStatDelta(CoreStat.Shields, 20);
+            opponent.ApplyStatDelta(CoreStat.Speed, 20);
+
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
+
+            Assert.AreEqual(EngagementOutcome.PlayerLost, match.ActiveEngagement.Outcome);
+
+            match.ResolveActiveEngagement(new Random(1));
+
+            Assert.IsNull(p1.ActiveJob);
+        }
     }
 }

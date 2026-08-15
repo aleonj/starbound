@@ -48,5 +48,49 @@ namespace StarBound.Tests
             Assert.AreEqual(PurchaseFailureReason.CargoFull, result.FailureReason);
             Assert.AreEqual(3, ship.GetStat(CoreStat.Shields));
         }
+
+        [Test]
+        public void TryPurchase_DoesNotApplyTheBonusUntilTheItemIsActuallyHeld()
+        {
+            // Regression guard for the old "bake the delta in at purchase
+            // time" behavior — the bonus must come from GetStat reading
+            // HeldItems live, not from ApplyStatDelta at purchase.
+            var ship = new Ship(cargoCapacity: 3, startingMoney: 200);
+            var item = new ItemDefinition("Weapons Upgrade +1", CoreStat.Weapons, 1, 50);
+
+            ShopService.TryPurchase(ship, item);
+            ship.TryRemoveItem(item);
+
+            Assert.AreEqual(3, ship.GetStat(CoreStat.Weapons));
+        }
+
+        [Test]
+        public void TrySell_Succeeds_RefundsHalfPriceAndRemovesItem()
+        {
+            var ship = new Ship(cargoCapacity: 3, startingMoney: 150);
+            var item = new ItemDefinition("Weapons Upgrade +1", CoreStat.Weapons, 1, 50);
+            ShopService.TryPurchase(ship, item);
+
+            var result = ShopService.TrySell(ship, item);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(25, result.Refund);
+            Assert.AreEqual(125, ship.Money); // 150 - 50 + 25
+            Assert.AreEqual(0, ship.HeldItems.Count);
+            Assert.AreEqual(3, ship.GetStat(CoreStat.Weapons)); // bonus gone
+        }
+
+        [Test]
+        public void TrySell_FailsWhenItemNotHeld()
+        {
+            var ship = new Ship(cargoCapacity: 3, startingMoney: 150);
+            var item = new ItemDefinition("Weapons Upgrade +1", CoreStat.Weapons, 1, 50);
+
+            var result = ShopService.TrySell(ship, item);
+
+            Assert.IsFalse(result.Success);
+            Assert.AreEqual(SellFailureReason.ItemNotHeld, result.FailureReason);
+            Assert.AreEqual(150, ship.Money);
+        }
     }
 }

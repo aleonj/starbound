@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using StarBound.Combat;
 using StarBound.Core;
+using StarBound.Economy;
 using StarBound.Map;
 using StarBound.Movement;
 using StarBound.Multiplayer;
@@ -34,6 +36,8 @@ namespace StarBound.Demo
         private RolledDie selectedDie;
         private bool showShop;
         private IReadOnlyList<ItemDefinition> shopOffer = Array.Empty<ItemDefinition>();
+        private bool showJobBoard;
+        private IReadOnlyList<JobDefinition> jobOffer = Array.Empty<JobDefinition>();
         private string lastMessage;
         private readonly List<string> combatLog = new();
         private GUIStyle headerStyle;
@@ -178,6 +182,28 @@ namespace StarBound.Demo
 
             GUILayout.Space(10);
 
+            GUI.enabled = canShopHere;
+            if (GUILayout.Button(showJobBoard ? "Close Job Board" : "Open Job Board"))
+            {
+                showJobBoard = !showJobBoard;
+                if (showJobBoard)
+                {
+                    match.EnterMarket();
+                    jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map);
+                }
+            }
+            GUI.enabled = true;
+
+            if (showJobBoard && canShopHere)
+                DrawJobBoardPanel();
+            else
+                showJobBoard = false;
+
+            if (match.CurrentPlayer.ActiveJob is { } activeJob)
+                DrawActiveJobStatus(activeJob);
+
+            GUILayout.Space(10);
+
             if (match.CanAttackOpponent)
             {
                 GUILayout.Label($"{match.OtherPlayer.DisplayName} is here.");
@@ -240,6 +266,151 @@ namespace StarBound.Demo
                 var result = RepairService.TryRepairOnePoint(match.CurrentPlayer.Ship, CoreStat.Energy);
                 lastMessage = result.Success ? "Energy repaired." : $"Repair failed: {result.FailureReason}";
             }
+
+            GUILayout.Space(5);
+            GUILayout.Label("-- Cargo --");
+            DrawHeldItems();
+        }
+
+        // Shared between the shop panel and the mid-engagement panel — a
+        // Consumable can be used from either place (see Match.CanUseItem).
+        private void DrawHeldItems()
+        {
+            foreach (var item in match.CurrentPlayer.Ship.HeldItems.ToList())
+            {
+                var kindLabel = item.Kind == ItemKind.Consumable ? " (consumable)" : "";
+                GUILayout.Label($"{item.Name}{kindLabel}");
+
+                if (item.Kind == ItemKind.Consumable && match.CanUseItem(item))
+                {
+                    if (GUILayout.Button($"  Use {item.Name}"))
+                    {
+                        match.UseItem(item);
+                        lastMessage = $"Used {item.Name}.";
+                    }
+                }
+
+                if (match.CanTradeWithOpponent(item))
+                {
+                    if (GUILayout.Button($"  Trade to {match.OtherPlayer.DisplayName} — ${item.Price / 2}"))
+                    {
+                        match.TradeItemToOpponent(item);
+                        lastMessage = $"Traded {item.Name} to {match.OtherPlayer.DisplayName}.";
+                    }
+                }
+                else if (GUILayout.Button($"  Sell {item.Name} — ${item.Price / 2}"))
+                {
+                    var result = ShopService.TrySell(match.CurrentPlayer.Ship, item);
+                    lastMessage = result.Success ? $"Sold {item.Name} for ${result.Refund}." : $"Sell failed: {result.FailureReason}";
+                }
+            }
+        }
+
+        // Mid-fight use only — no sell/trade here, those stay market/opponent-side actions.
+        private void DrawConsumablesMidEngagement()
+        {
+            var usable = match.CurrentPlayer.Ship.HeldItems
+                .Where(item => item.Kind == ItemKind.Consumable && match.CanUseItem(item))
+                .ToList();
+
+            if (usable.Count == 0)
+                return;
+
+            GUILayout.Space(5);
+            foreach (var item in usable)
+            {
+                if (GUILayout.Button($"Use {item.Name}"))
+                {
+                    match.UseItem(item);
+                    combatLog.Add($"Used {item.Name}.");
+                }
+            }
+        }
+
+        private void DrawJobBoardPanel()
+        {
+            GUILayout.Space(5);
+            GUILayout.Label("-- Job Board --", headerStyle);
+
+            if (match.CurrentPlayer.ActiveJob != null)
+            {
+                GUILayout.Label("Already have an active job — deliver or complete it first.");
+                return;
+            }
+
+            foreach (var job in jobOffer)
+            {
+                var description = job.Type switch
+                {
+                    JobType.BountyHunting => $"Bounty ({job.BountyTier}) at {job.Destination} — ${job.Reward}",
+                    JobType.Mining => $"Mining: mine an Asteroids field, then deliver to {job.Destination} — ${job.Reward}",
+                    _ => $"{job.Type} to {job.Destination} — ${job.Reward}"
+                };
+
+                if (GUILayout.Button($"Accept: {description}"))
+                {
+                    var result = JobService.TryAcceptJob(match.CurrentPlayer, job);
+                    lastMessage = result.Success ? $"Accepted job: {description}" : $"Accept failed: {result.FailureReason}";
+                    if (result.Success)
+                        RefreshView();
+                }
+            }
+        }
+
+        private void DrawActiveJobStatus(JobDefinition job)
+        {
+            GUILayout.Space(5);
+            GUILayout.Label("-- Active Job --", headerStyle);
+
+            if (job.Type == JobType.BountyHunting)
+            {
+                GUILayout.Label($"Bounty ({job.BountyTier}): defeat the pirate marked at {job.Destination} (highlighted on the map) — reward ${job.Reward}.");
+                GUILayout.Label("Just move onto that hex — the fight starts automatically, same as any encounter.");
+                GUILayout.Label($"Escaping that fight voids the job and costs a ${job.Reward / 10} penalty.");
+                return;
+            }
+
+            if (job.Type == JobType.Mining && !match.CurrentPlayer.HasMinedCargo)
+            {
+                GUILayout.Label($"Mining: find an Asteroids field (highlighted on the map) and mine there first, then deliver to {job.Destination} — reward ${job.Reward}.");
+
+                if (match.CanMineAsteroid)
+                {
+                    if (GUILayout.Button("Mine"))
+                    {
+                        match.MineAsteroid();
+                        lastMessage = "Mined — now deliver the cargo.";
+                        RefreshView();
+                    }
+                }
+                else
+                {
+                    GUILayout.Label("Not on an Asteroids field yet.");
+                }
+
+                return;
+            }
+
+            var verb = job.Type == JobType.Mining ? "Deliver the minerals" : "Drop off the passenger";
+            GUILayout.Label($"{job.Type}: {verb} at {job.Destination} (highlighted on the map) — reward ${job.Reward}.");
+
+            if (match.CanDeliverJob)
+            {
+                if (GUILayout.Button($"Deliver — ${job.Reward}"))
+                {
+                    match.DeliverJob();
+                    lastMessage = $"Delivered — earned ${job.Reward}.";
+                    RefreshView();
+                }
+            }
+            else if (match.CurrentPlayer.Position == job.Destination)
+            {
+                GUILayout.Label("You're here — Deliver will appear once you've rolled dice this turn.");
+            }
+            else
+            {
+                GUILayout.Label("Travel there, then Deliver will appear.");
+            }
         }
 
         private void DrawEngagementPanel()
@@ -260,6 +431,8 @@ namespace StarBound.Demo
 
             if (session.Outcome == EngagementOutcome.InProgress)
             {
+                DrawConsumablesMidEngagement();
+
                 GUILayout.Space(10);
 
                 if (!session.IsAwaitingAttackResolution)
@@ -391,8 +564,26 @@ namespace StarBound.Demo
 
         private void RefreshView()
         {
-            IReadOnlyCollection<HexCoordinate> highlighted =
-                selectedDie != null ? ComputeLegalTargets(selectedDie) : Array.Empty<HexCoordinate>();
+            var highlighted = selectedDie != null ? ComputeLegalTargets(selectedDie) : new List<HexCoordinate>();
+
+            // Always show where the active job wants you to go next —
+            // otherwise there's no way to tell. An unmined Mining job
+            // wants any Asteroids field (there's no single destination
+            // for that step); everything else has one fixed hex.
+            if (match.CurrentPlayer.ActiveJob is { } job)
+            {
+                if (job.Type == JobType.Mining && !match.CurrentPlayer.HasMinedCargo)
+                {
+                    highlighted.AddRange(match.Map.Hexes
+                        .Where(hex => hex.Terrain == TerrainType.Asteroids)
+                        .Select(hex => hex.Coordinate));
+                }
+                else
+                {
+                    highlighted.Add(job.Destination);
+                }
+            }
+
             mapView.Render(match.Map, hexRadius, highlighted);
             UpdateShipMarkers();
         }

@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using StarBound.Combat;
 using StarBound.Core;
+using StarBound.Economy;
 using StarBound.Map;
 using StarBound.Movement;
 
@@ -65,6 +66,28 @@ namespace StarBound.Multiplayer
 
         public bool CanAttackOpponent => IsOnOpponentHex && !IsInEngagement && !IsComplete;
 
+        // Deliberately NOT gated by !IsInEngagement — using a consumable
+        // (e.g. a repair kit) mid-fight is the whole point.
+        public bool CanUseItem(ItemDefinition item) =>
+            !IsComplete && item.Kind == ItemKind.Consumable && CurrentPlayer.Ship.HeldItems.Contains(item);
+
+        public bool CanTradeWithOpponent(ItemDefinition item) =>
+            IsOnOpponentHex && !IsInEngagement && !IsComplete &&
+            CurrentPlayer.Ship.HeldItems.Contains(item) && OtherPlayer.Ship.CanHoldAnotherItem &&
+            OtherPlayer.Ship.Money >= item.Price / 2;
+
+        // Mining is two steps: mine at any Asteroids field first, then
+        // deliver — a delivery isn't possible until the cargo's mined.
+        public bool CanMineAsteroid =>
+            !IsInEngagement && !IsComplete && currentHand != null &&
+            CurrentPlayer.ActiveJob is { Type: JobType.Mining } && !CurrentPlayer.HasMinedCargo &&
+            Map.TryGetHex(CurrentPlayer.Position, out var hex) && hex.Terrain == TerrainType.Asteroids;
+
+        public bool CanDeliverJob =>
+            CanShop && CurrentPlayer.ActiveJob is { } job &&
+            job.Type != JobType.BountyHunting && job.Destination == CurrentPlayer.Position &&
+            (job.Type != JobType.Mining || CurrentPlayer.HasMinedCargo);
+
         public DiceHand RollDice(Random rng)
         {
             EnsureMatchInProgress();
@@ -122,8 +145,10 @@ namespace StarBound.Multiplayer
         // Choosing to attack the other player ends movement for the rest
         // of the turn, same as any other engagement. Reuses the PvE round
         // mechanics against the opponent's real (persistent) ship rather
-        // than a generated one — trading and mutual escape are still
-        // deferred, tracked separately.
+        // than a generated one — mutual escape (the opponent getting to
+        // act too) is still deferred, tracked separately. Item trading
+        // (TradeItemToOpponent) is a separate standing action while
+        // sharing a hex, not tied to choosing Attack.
         public void AttackOpponent()
         {
             EnsureMatchInProgress();
@@ -133,6 +158,59 @@ namespace StarBound.Multiplayer
             var definition = new EngagementDefinition(
                 EngagementTier.None, hullRange: (0, 0), weaponsRange: (0, 0), shieldsRange: (0, 0), speedRange: (0, 0));
             activeEngagement = new EngagementSession(definition, CurrentPlayer, OtherPlayer.Ship, isPvP: true);
+            movementLocked = true;
+        }
+
+        // Using a consumable applies its effect immediately and destroys
+        // it — permitted mid-engagement (see CanUseItem).
+        public void UseItem(ItemDefinition item)
+        {
+            EnsureMatchInProgress();
+            if (!CanUseItem(item))
+                throw new InvalidOperationException("Can't use that item right now.");
+
+            CurrentPlayer.Ship.UseConsumableItem(item);
+        }
+
+        // The receiving player pays half the item's price — same rate as
+        // selling it to the market, just to a player instead. No
+        // negotiation UI; this is a flat, always-available offer.
+        public void TradeItemToOpponent(ItemDefinition item)
+        {
+            EnsureMatchInProgress();
+            if (!CanTradeWithOpponent(item))
+                throw new InvalidOperationException("Can't trade that item right now.");
+
+            var price = item.Price / 2;
+            OtherPlayer.Ship.TrySpendMoney(price);
+            CurrentPlayer.Ship.TryRemoveItem(item);
+            OtherPlayer.Ship.TryAddItem(item);
+            CurrentPlayer.Ship.AddMoney(price);
+        }
+
+        // Mining the cargo ends movement for the turn, same as any other
+        // stop-and-do-something action — it doesn't pay out by itself,
+        // it just unlocks delivery at the job's destination.
+        public void MineAsteroid()
+        {
+            EnsureMatchInProgress();
+            if (!CanMineAsteroid)
+                throw new InvalidOperationException("There's no cargo to mine here.");
+
+            CurrentPlayer.MarkCargoMined();
+            movementLocked = true;
+        }
+
+        // Delivering a mining/transport job pays out and ends movement
+        // for the turn, same as any other planet-side action.
+        public void DeliverJob()
+        {
+            EnsureMatchInProgress();
+            if (!CanDeliverJob)
+                throw new InvalidOperationException("There's no job to deliver here.");
+
+            CurrentPlayer.Ship.AddMoney(CurrentPlayer.ActiveJob.Reward);
+            CurrentPlayer.ClearActiveJob();
             movementLocked = true;
         }
 
@@ -147,6 +225,7 @@ namespace StarBound.Multiplayer
                 throw new InvalidOperationException("There's no resolved engagement to finalize.");
 
             var wasPvP = activeEngagement.IsPvP;
+            var resolvedHex = CurrentPlayer.Position; // captured before RelocateAfterEscape can move the player
 
             // Only defeating the opponent removes it from the map — on a
             // loss or an escape, nothing was actually resolved, so the
@@ -164,6 +243,11 @@ namespace StarBound.Multiplayer
             {
                 RelocateAfterEscape(rng);
             }
+
+            // Skipped for PvP: a bounty job targets a specific marked NPC
+            // hex, never the other player, even if they happen to share it.
+            if (!wasPvP)
+                JobService.ResolveBountyOutcome(CurrentPlayer, resolvedHex, activeEngagement.Outcome);
 
             // The opponent is a real, persistent player here — a PvP loss
             // can deplete their Hull too, so they get the same zero-Hull
