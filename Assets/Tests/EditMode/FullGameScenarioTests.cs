@@ -322,5 +322,183 @@ namespace StarBound.Tests
             Assert.IsFalse(match.CanAttackOpponent);
             Assert.IsTrue(match.CanEndTurn);
         }
+
+        [Test]
+        public void PvPTrade_BuyThenTravelThenTrade_TransfersItemAndMoneyWithoutAffectingVictory()
+        {
+            var (match, p1, p2) = BuildScenarioMatch();
+            p1.Ship.AddMoney(200);
+            p2.Ship.AddMoney(200);
+            var item = ItemPool.Items.First(i => i.Kind == ItemKind.Permanent && i.AffectedStat == CoreStat.Weapons);
+
+            // Turn 1: buy at home, then travel the whole way to p2's planet
+            // in one Move session (buying already used the market action,
+            // so the 3-hex chain here is the turn's other action).
+            match.RollDice(new Random(1));
+            match.BuyItem(item);
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            match.Move(new RolledDie(1, TerrainType.Asteroids), new HexCoordinate(2, 0), new Random(1));
+            match.Move(new RolledDie(2, TerrainType.PlanetOrStarport), new HexCoordinate(3, 0), new Random(1));
+            Assert.AreEqual(0, match.ActionsRemaining);
+
+            match.EndTurn(); // p2 passes
+            match.EndTurn(); // back to p1, fresh turn, still on p2's hex
+
+            Assert.IsTrue(match.IsOnOpponentHex);
+            Assert.IsTrue(match.CanTradeWithOpponent(item));
+
+            match.TradeItemToOpponent(item);
+
+            Assert.AreEqual(0, p1.Ship.HeldItems.Count);
+            Assert.AreEqual(1, p2.Ship.HeldItems.Count);
+            Assert.AreEqual(200 - item.Price + item.Price / 2, p1.Ship.Money); // paid full price, got half back
+            Assert.AreEqual(200 - item.Price / 2, p2.Ship.Money); // paid half price
+            Assert.AreEqual(0, p1.EasyEngagementWins);
+            Assert.IsFalse(p1.HasWonMatch);
+            Assert.IsFalse(match.IsInEngagement); // trading never starts a fight
+        }
+
+        [Test]
+        public void PassAndPlay_BothPlayersActAcrossSeveralTurns_ActionBudgetsResetIndependently()
+        {
+            var (match, p1, p2) = BuildScenarioMatch();
+            p1.Ship.AddMoney(100);
+
+            // Turn 1 (p1): shop only, deliberately leaving an action spare.
+            Assert.AreEqual(p1, match.CurrentPlayer);
+            match.RollDice(new Random(1));
+            var item = ItemPool.Items.First(i => i.Kind == ItemKind.Permanent && i.AffectedStat == CoreStat.Shields);
+            match.BuyItem(item);
+            Assert.AreEqual(1, match.ActionsRemaining);
+            match.EndTurn();
+
+            // Turn 2 (p2): a completely fresh budget, unaffected by p1's
+            // spend — move toward p1.
+            Assert.AreEqual(p2, match.CurrentPlayer);
+            Assert.AreEqual(Match.ActionsPerTurn, match.ActionsRemaining);
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.Asteroids), new HexCoordinate(2, 0), new Random(1));
+            match.EndTurn();
+
+            // Turn 3 (p1): fresh budget again — move to meet p2 halfway.
+            Assert.AreEqual(p1, match.CurrentPlayer);
+            Assert.AreEqual(Match.ActionsPerTurn, match.ActionsRemaining);
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            match.EndTurn();
+
+            // Turn 4 (p2): closes the gap, landing on p1's hex.
+            Assert.AreEqual(p2, match.CurrentPlayer);
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsTrue(match.IsOnOpponentHex);
+            Assert.AreEqual(1, p1.Ship.HeldItems.Count); // p1's turn-1 purchase persisted across every handoff
+        }
+
+        [Test]
+        public void Move_OntoTradelane_DeductsTheTollAndTheMoveSessionStaysOpen()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.Tradelane));
+            map.SetHex(new Hex(new HexCoordinate(2, 0), TerrainType.ClearSpace));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.AddMoney(10);
+
+            match.RollDice(new Random(1));
+            var tollResult = match.Move(new RolledDie(0, TerrainType.Tradelane), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsTrue(tollResult.Success);
+            Assert.AreEqual(10 - TollPricing.TradelaneTollPerHex, p1.Ship.Money);
+            Assert.IsTrue(match.CanMove); // Move session stays open regardless of the toll
+
+            var secondResult = match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1));
+
+            Assert.IsTrue(secondResult.Success);
+            Assert.AreEqual(1, match.ActionsRemaining); // both hexes were still just the one Move action
+        }
+
+        [Test]
+        public void FullMatchToVictory_ThreeRealHardEngagementsFoughtOutInSequence()
+        {
+            var map = new GameMap(radius: 4, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Hard });
+            map.SetHex(new Hex(new HexCoordinate(2, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Hard });
+            map.SetHex(new Hex(new HexCoordinate(3, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Hard });
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+
+            var targets = new[] { new HexCoordinate(1, 0), new HexCoordinate(2, 0), new HexCoordinate(3, 0) };
+            for (var i = 0; i < targets.Length; i++)
+            {
+                match.RollDice(new Random(1));
+                match.Move(new RolledDie(0, TerrainType.ClearSpace), targets[i], new Random(1));
+
+                Assert.IsTrue(match.IsInEngagement);
+                PlayOutEngagement(match, new Random(1));
+                Assert.AreEqual(EngagementOutcome.PlayerWon, match.ActiveEngagement.Outcome);
+
+                match.ResolveActiveEngagement(new Random(1));
+
+                if (i < targets.Length - 1)
+                {
+                    match.EndTurn(); // p2 passes
+                    match.EndTurn(); // back to p1, fresh turn
+                }
+            }
+
+            Assert.AreEqual(3, p1.HardEngagementWins);
+            Assert.IsTrue(match.IsComplete);
+            Assert.AreEqual(p1, match.Winner);
+        }
+
+        [Test]
+        public void Discovery_BothPlayersLandOnTheSameMarkedHex_EachOnlySeesItOnceTheyveBeenThereThemselves()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            map.SetHex(new Hex(new HexCoordinate(2, 0), TerrainType.PlanetOrStarport));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(2, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape
+
+            // p1 discovers it first, on their own turn — escapes so the
+            // marker survives for p2 to find independently later.
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            Assert.IsTrue(match.IsInEngagement);
+            match.ActiveEngagement.AttemptEscape(new Random(1));
+            Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome);
+            match.ResolveActiveEngagement(new Random(1));
+
+            CollectionAssert.Contains(p1.DiscoveredEngagementHexes.ToList(), new HexCoordinate(1, 0));
+            Assert.IsFalse(p2.DiscoveredEngagementHexes.Contains(new HexCoordinate(1, 0)));
+
+            match.EndTurn(); // now p2's turn
+
+            // The marker is still physically there (p1 only escaped, didn't
+            // win) but remains undiscovered on p2's own view.
+            Assert.IsTrue(match.Map.TryGetHex(new HexCoordinate(1, 0), out var hex));
+            Assert.IsTrue(hex.HasEngagement);
+            Assert.IsFalse(p2.DiscoveredEngagementHexes.Contains(new HexCoordinate(1, 0)));
+
+            // p2 now lands on the same hex independently.
+            p2.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsTrue(match.IsInEngagement);
+            CollectionAssert.Contains(p2.DiscoveredEngagementHexes.ToList(), new HexCoordinate(1, 0));
+        }
     }
 }
