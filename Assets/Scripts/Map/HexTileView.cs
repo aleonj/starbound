@@ -45,9 +45,14 @@ namespace StarBound.Map
             markerRenderer.sortingOrder = 1;
         }
 
+        // `== null` (not just TryGetValue) because a destroyed
+        // UnityEngine.Object isn't a real C# null reference — with Domain
+        // Reload disabled in Enter Play Mode Settings, these static caches
+        // survive Stop/Play but the Mesh objects they hold get destroyed,
+        // which otherwise makes every hex tile invisible on the next Play.
         private static Mesh GetOrCreate(Dictionary<float, Mesh> cache, float radius)
         {
-            if (!cache.TryGetValue(radius, out var mesh))
+            if (!cache.TryGetValue(radius, out var mesh) || mesh == null)
             {
                 mesh = HexMeshFactory.CreateFlatTopHex(radius);
                 cache[radius] = mesh;

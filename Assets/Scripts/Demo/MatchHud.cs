@@ -113,6 +113,7 @@ namespace StarBound.Demo
                 $"Wins — Easy: {match.CurrentPlayer.EasyEngagementWins}  " +
                 $"Medium: {match.CurrentPlayer.MediumEngagementWins}  " +
                 $"Hard: {match.CurrentPlayer.HardEngagementWins}/{Player.HardWinsToVictory}");
+            GUILayout.Label($"Actions remaining: {match.ActionsRemaining}/{Match.ActionsPerTurn}");
 
             GUILayout.Space(10);
 
@@ -128,7 +129,7 @@ namespace StarBound.Demo
             else if (match.CanMove)
             {
                 GUILayout.Label(match.IsCurrentPlayerOnPlanet
-                    ? "Docked — pick a die to keep traveling, or enter the market to stop:"
+                    ? "Docked — pick a die to keep traveling, or browse the market (browsing is free):"
                     : "Dice — pick one, then click a highlighted hex on the map:");
                 foreach (var die in match.CurrentHand.Dice)
                 {
@@ -148,10 +149,13 @@ namespace StarBound.Demo
             }
             else
             {
-                GUILayout.Label("Movement already used this turn.");
+                GUILayout.Label("No actions left to move with this turn.");
                 foreach (var die in match.CurrentHand.Dice)
                     GUILayout.Label($"  {die.Terrain}{(die.IsSpent ? " (spent)" : "")}");
             }
+
+            if (match.CanTravelWormhole)
+                DrawWormholeTravelPanel();
 
             GUILayout.Space(10);
 
@@ -161,19 +165,12 @@ namespace StarBound.Demo
             {
                 showShop = !showShop;
                 if (showShop)
-                {
-                    match.EnterMarket();
                     shopOffer = ShopOfferGenerator.GenerateOffer(rng);
-                }
             }
             GUI.enabled = true;
 
             if (match.IsCurrentPlayerOnPlanet && !match.CanShop)
-            {
-                GUILayout.Label(match.CurrentHand == null
-                    ? "Roll dice before entering the market."
-                    : "Market closed — already had an engagement this turn.");
-            }
+                GUILayout.Label("Market closed — no actions left this turn.");
 
             if (showShop && canShopHere)
                 DrawShopPanel();
@@ -182,19 +179,20 @@ namespace StarBound.Demo
 
             GUILayout.Space(10);
 
-            GUI.enabled = canShopHere;
+            var canVisitJobBoardHere = match.IsCurrentPlayerOnPlanet && match.CanAcceptJob;
+            GUI.enabled = canVisitJobBoardHere;
             if (GUILayout.Button(showJobBoard ? "Close Job Board" : "Open Job Board"))
             {
                 showJobBoard = !showJobBoard;
                 if (showJobBoard)
-                {
-                    match.EnterMarket();
                     jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map);
-                }
             }
             GUI.enabled = true;
 
-            if (showJobBoard && canShopHere)
+            if (match.IsCurrentPlayerOnPlanet && !match.CanAcceptJob)
+                GUILayout.Label("Job board closed — no actions left this turn.");
+
+            if (showJobBoard && canVisitJobBoardHere)
                 DrawJobBoardPanel();
             else
                 showJobBoard = false;
@@ -213,6 +211,7 @@ namespace StarBound.Demo
                     lastMessage = null;
                     combatLog.Clear();
                 }
+                DrawTradePanel();
                 GUILayout.Space(10);
             }
 
@@ -250,20 +249,32 @@ namespace StarBound.Demo
             {
                 if (GUILayout.Button($"Buy {item.Name} — {item.Price}"))
                 {
-                    var result = ShopService.TryPurchase(match.CurrentPlayer.Ship, item);
+                    var result = match.BuyItem(item);
                     lastMessage = result.Success ? $"Bought {item.Name}." : $"Purchase failed: {result.FailureReason}";
+                }
+            }
+
+            GUILayout.Space(5);
+            // Always shown (not part of the randomized offer above) — a
+            // mechanic-unlocking purchase shouldn't be gated by luck.
+            if (!match.CurrentPlayer.Ship.HeldItems.Contains(ItemPool.WormholeDevice))
+            {
+                if (GUILayout.Button($"Buy {ItemPool.WormholeDevice.Name} — {ItemPool.WormholeDevice.Price}"))
+                {
+                    var result = match.BuyItem(ItemPool.WormholeDevice);
+                    lastMessage = result.Success ? $"Bought {ItemPool.WormholeDevice.Name}." : $"Purchase failed: {result.FailureReason}";
                 }
             }
 
             GUILayout.Space(5);
             if (GUILayout.Button($"Repair Hull +1 — {RepairService.CostPerPoint}"))
             {
-                var result = RepairService.TryRepairOnePoint(match.CurrentPlayer.Ship, CoreStat.Hull);
+                var result = match.RepairStat(CoreStat.Hull);
                 lastMessage = result.Success ? "Hull repaired." : $"Repair failed: {result.FailureReason}";
             }
             if (GUILayout.Button($"Repair Energy +1 — {RepairService.CostPerPoint}"))
             {
-                var result = RepairService.TryRepairOnePoint(match.CurrentPlayer.Ship, CoreStat.Energy);
+                var result = match.RepairStat(CoreStat.Energy);
                 lastMessage = result.Success ? "Energy repaired." : $"Repair failed: {result.FailureReason}";
             }
 
@@ -278,7 +289,12 @@ namespace StarBound.Demo
         {
             foreach (var item in match.CurrentPlayer.Ship.HeldItems.ToList())
             {
-                var kindLabel = item.Kind == ItemKind.Consumable ? " (consumable)" : "";
+                var kindLabel = item.Kind switch
+                {
+                    ItemKind.Consumable => " (consumable)",
+                    ItemKind.Unlock => " (device)",
+                    _ => ""
+                };
                 GUILayout.Label($"{item.Name}{kindLabel}");
 
                 if (item.Kind == ItemKind.Consumable && match.CanUseItem(item))
@@ -300,7 +316,7 @@ namespace StarBound.Demo
                 }
                 else if (GUILayout.Button($"  Sell {item.Name} — ${item.Price / 2}"))
                 {
-                    var result = ShopService.TrySell(match.CurrentPlayer.Ship, item);
+                    var result = match.SellItem(item);
                     lastMessage = result.Success ? $"Sold {item.Name} for ${result.Refund}." : $"Sell failed: {result.FailureReason}";
                 }
             }
@@ -327,6 +343,74 @@ namespace StarBound.Demo
             }
         }
 
+        // Standing trade offer while sharing a hex with the opponent —
+        // deliberately independent of the Shop/planet gating (CanTradeWithOpponent
+        // doesn't require being on a planet, so this can't live inside
+        // DrawShopPanel/DrawHeldItems or it'd be unreachable off-planet).
+        private void DrawTradePanel()
+        {
+            var heldItems = match.CurrentPlayer.Ship.HeldItems.ToList();
+
+            GUILayout.Space(5);
+            GUILayout.Label("-- Trade --");
+
+            if (heldItems.Count == 0)
+            {
+                // Trade only offers what the mover is carrying — it's not a
+                // request-from-opponent flow — so this is expected, not an
+                // error, whenever the mover hasn't bought anything yet.
+                GUILayout.Label($"You have nothing to trade {match.OtherPlayer.DisplayName}. Buy something from a shop first.");
+                return;
+            }
+
+            foreach (var item in heldItems)
+            {
+                if (match.CanTradeWithOpponent(item))
+                {
+                    if (GUILayout.Button($"Trade {item.Name} to {match.OtherPlayer.DisplayName} — ${item.Price / 2}"))
+                    {
+                        match.TradeItemToOpponent(item);
+                        lastMessage = $"Traded {item.Name} to {match.OtherPlayer.DisplayName}.";
+                    }
+                }
+                else
+                {
+                    var reason = !match.OtherPlayer.Ship.CanHoldAnotherItem
+                        ? $"{match.OtherPlayer.DisplayName}'s cargo is full"
+                        : $"{match.OtherPlayer.DisplayName} can't afford ${item.Price / 2}";
+                    GUILayout.Label($"{item.Name} — can't trade: {reason}");
+                }
+            }
+        }
+
+        // Standing movement option for anyone holding the Wormhole Device
+        // (see Match.CanTravelWormhole) — available any time during the
+        // movement phase, not just while parked on a wormhole hex. Lists
+        // every wormhole on the map as a travel target.
+        private void DrawWormholeTravelPanel()
+        {
+            GUILayout.Space(5);
+            GUILayout.Label("-- Wormhole --", headerStyle);
+
+            var destinations = match.OtherWormholeDestinations.ToList();
+            if (destinations.Count == 0)
+            {
+                GUILayout.Label("No other wormhole exists on this map yet.");
+                return;
+            }
+
+            foreach (var destination in destinations)
+            {
+                if (GUILayout.Button($"Travel to ({destination.Q}, {destination.R})"))
+                {
+                    match.TravelToWormhole(destination, rng);
+                    lastMessage = null;
+                    combatLog.Clear();
+                    RefreshView();
+                }
+            }
+        }
+
         private void DrawJobBoardPanel()
         {
             GUILayout.Space(5);
@@ -349,7 +433,7 @@ namespace StarBound.Demo
 
                 if (GUILayout.Button($"Accept: {description}"))
                 {
-                    var result = JobService.TryAcceptJob(match.CurrentPlayer, job);
+                    var result = match.AcceptJob(job);
                     lastMessage = result.Success ? $"Accepted job: {description}" : $"Accept failed: {result.FailureReason}";
                     if (result.Success)
                         RefreshView();
@@ -584,7 +668,7 @@ namespace StarBound.Demo
                 }
             }
 
-            mapView.Render(match.Map, hexRadius, highlighted);
+            mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes);
             UpdateShipMarkers();
         }
 

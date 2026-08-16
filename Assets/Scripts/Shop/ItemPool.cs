@@ -14,6 +14,14 @@ namespace StarBound.Shop
     {
         public static readonly IReadOnlyList<ItemDefinition> Items = BuildPool();
 
+        // Deliberately not part of Items/ShopOfferGenerator's random
+        // sampling — a mechanic-unlocking purchase shouldn't be gated by
+        // luck. Always shown as its own standing offer in the shop. Price
+        // is a placeholder, ~5x the priciest stat item, matching "not
+        // cheap" per the story.
+        public static readonly ItemDefinition WormholeDevice =
+            new("Wormhole Device", null, null, 500, ItemKind.Unlock);
+
         private static List<ItemDefinition> BuildPool()
         {
             var items = new List<ItemDefinition>();

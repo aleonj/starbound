@@ -126,6 +126,18 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void GetStat_IgnoresHeldUnlockItems()
+        {
+            var ship = new Ship(cargoCapacity: 2);
+            var device = new ItemDefinition("Wormhole Device", null, null, 500, ItemKind.Unlock);
+
+            ship.TryAddItem(device);
+
+            Assert.AreEqual(3, ship.GetStat(CoreStat.Weapons));
+            Assert.AreEqual(3, ship.GetStat(CoreStat.Hull));
+        }
+
+        [Test]
         public void GetStat_IgnoresHeldConsumablesUntilUsed()
         {
             var ship = new Ship(cargoCapacity: 2);

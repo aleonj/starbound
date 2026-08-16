@@ -19,9 +19,15 @@ namespace StarBound.Demo
             meshRenderer.sortingOrder = 2; // above terrain (0) and engagement markers (1)
         }
 
+        // Both caches check `== null` (not just TryGetValue) because a
+        // destroyed UnityEngine.Object isn't a real C# null reference —
+        // with Domain Reload disabled in Enter Play Mode Settings, these
+        // static caches survive Stop/Play but the Mesh/Material objects
+        // they hold get destroyed, so a stale-but-non-null entry would
+        // otherwise be handed back on the next Play session.
         private static Mesh GetOrCreateMesh(float radius)
         {
-            if (!MeshCache.TryGetValue(radius, out var mesh))
+            if (!MeshCache.TryGetValue(radius, out var mesh) || mesh == null)
             {
                 mesh = HexMeshFactory.CreateFlatTopHex(radius);
                 MeshCache[radius] = mesh;
@@ -32,7 +38,7 @@ namespace StarBound.Demo
 
         private static Material GetOrCreateMaterial(Color color)
         {
-            if (!MaterialCache.TryGetValue(color, out var material))
+            if (!MaterialCache.TryGetValue(color, out var material) || material == null)
             {
                 material = new Material(Shader.Find("Sprites/Default")) { color = color, mainTexture = Texture2D.whiteTexture };
                 MaterialCache[color] = material;

@@ -18,7 +18,9 @@ namespace StarBound.Map
 
         public static Material Get(EngagementTier tier)
         {
-            if (!Cache.TryGetValue(tier, out var material))
+            // See TerrainMaterials.Get — same stale-cache-across-Play-
+            // sessions issue when Domain Reload is disabled.
+            if (!Cache.TryGetValue(tier, out var material) || material == null)
             {
                 material = CreateMaterial(Colors[tier]);
                 Cache[tier] = material;

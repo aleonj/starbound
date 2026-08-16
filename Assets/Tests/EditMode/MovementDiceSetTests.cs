@@ -27,8 +27,7 @@ namespace StarBound.Tests
         [TestCase(TerrainType.Tradelane)]
         [TestCase(TerrainType.Mines)]
         [TestCase(TerrainType.Debris)]
-        [TestCase(TerrainType.Wormhole)]
-        public void EveryNonPlanetTerrainType_AppearsOnAtLeastOneDie(TerrainType terrain)
+        public void EveryNonPlanetNonWormholeTerrainType_AppearsOnAtLeastOneDie(TerrainType terrain)
         {
             var appears = MovementDiceSet.Dice.Any(die =>
                 Enumerable.Range(1, 6).Select(die.FaceAt).Contains(terrain));
@@ -46,12 +45,15 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void Wormhole_AppearsOnAtMostTwoDice()
+        public void Wormhole_NeverAppearsOnADieFace()
         {
-            var diceWithWormhole = MovementDiceSet.Dice.Count(die =>
+            // Wormhole travel is exclusively the Wormhole Device's standing
+            // movement option (see Match.CanTravelWormhole) — not
+            // die-based at all, so it should never come up on a roll.
+            var appears = MovementDiceSet.Dice.Any(die =>
                 Enumerable.Range(1, 6).Select(die.FaceAt).Contains(TerrainType.Wormhole));
 
-            Assert.LessOrEqual(diceWithWormhole, 2, "Wormhole should be rare — on at most 2 of the 5 dice.");
+            Assert.IsFalse(appears, "Wormhole is reached via the device's travel option, not a die face.");
         }
 
         [Test]
@@ -78,6 +80,31 @@ namespace StarBound.Tests
         public void MovementDie_Constructor_RequiresExactlySixFaces()
         {
             Assert.Throws<ArgumentException>(() => new MovementDie(TerrainType.ClearSpace, TerrainType.Asteroids));
+        }
+
+        [Test]
+        public void FaceFrequency_StrictlyDescendsByDifficulty()
+        {
+            // User-specified ascending difficulty order: ClearSpace < Tradelane
+            // < Debris < Asteroids < Mines — so face counts (how often
+            // you're able to use that terrain) must strictly descend in
+            // the same order. Wormhole is excluded here entirely — it's no
+            // longer die-reachable at all (see Wormhole_NeverAppearsOnADieFace),
+            // so it doesn't have a meaningful "frequency" to rank.
+            var terrainsEasiestFirst = new[]
+            {
+                TerrainType.ClearSpace, TerrainType.Tradelane, TerrainType.Debris,
+                TerrainType.Asteroids, TerrainType.Mines
+            };
+
+            int CountFaces(TerrainType terrain) => MovementDiceSet.Dice
+                .Sum(die => Enumerable.Range(1, 6).Count(face => die.FaceAt(face) == terrain));
+
+            var counts = terrainsEasiestFirst.Select(CountFaces).ToArray();
+
+            for (var i = 1; i < counts.Length; i++)
+                Assert.Less(counts[i], counts[i - 1],
+                    $"{terrainsEasiestFirst[i]} ({counts[i]}) should appear less often than {terrainsEasiestFirst[i - 1]} ({counts[i - 1]}).");
         }
     }
 }

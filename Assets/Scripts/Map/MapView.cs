@@ -16,22 +16,28 @@ namespace StarBound.Map
             Render(map, hexRadius);
         }
 
-        public void Render(GameMap map, float hexRadius, IReadOnlyCollection<HexCoordinate> highlighted = null)
+        public void Render(
+            GameMap map,
+            float hexRadius,
+            IReadOnlyCollection<HexCoordinate> highlighted = null,
+            IReadOnlyCollection<HexCoordinate> discoveredEngagementHexes = null)
         {
             foreach (Transform child in transform)
                 Destroy(child.gameObject);
 
             highlighted ??= System.Array.Empty<HexCoordinate>();
+            discoveredEngagementHexes ??= System.Array.Empty<HexCoordinate>();
 
             foreach (var hex in map.Hexes)
             {
                 var isHighlighted = highlighted.Contains(hex.Coordinate);
+                var visibleTier = EngagementVisibility.GetVisibleTier(hex, discoveredEngagementHexes);
                 var tileObject = new GameObject(
                     $"Hex ({hex.Coordinate.Q}, {hex.Coordinate.R})",
                     typeof(HexTileView));
                 tileObject.transform.SetParent(transform, false);
                 tileObject.transform.localPosition = HexLayout.AxialToWorld(hex.Coordinate, hexRadius);
-                tileObject.GetComponent<HexTileView>().Initialize(hex.Terrain, hex.Engagement, hexRadius, isHighlighted);
+                tileObject.GetComponent<HexTileView>().Initialize(hex.Terrain, visibleTier, hexRadius, isHighlighted);
             }
         }
     }

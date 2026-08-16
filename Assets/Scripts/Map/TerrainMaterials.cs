@@ -23,7 +23,14 @@ namespace StarBound.Map
 
         public static Material Get(TerrainType terrain)
         {
-            if (!Cache.TryGetValue(terrain, out var material))
+            // The `== null` check (not just TryGetValue) matters here: with
+            // Domain Reload disabled in Enter Play Mode Settings, this
+            // static cache survives Stop/Play, but Unity destroys the
+            // actual Material objects it created during the previous
+            // session. A destroyed UnityEngine.Object isn't a real C# null
+            // reference, so only Unity's overloaded == catches it and lets
+            // us recreate the material instead of handing back a dead one.
+            if (!Cache.TryGetValue(terrain, out var material) || material == null)
             {
                 material = CreateMaterial(Colors[terrain]);
                 Cache[terrain] = material;

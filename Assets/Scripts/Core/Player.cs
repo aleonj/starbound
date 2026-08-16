@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace StarBound.Core
 {
@@ -28,6 +29,13 @@ namespace StarBound.Core
         // since JobDefinition is an immutable spec and this is progress
         // toward completing it.
         public bool HasMinedCargo { get; private set; }
+
+        // Per-player discovery: an engagement marker only shows on this
+        // player's view of the map once they've personally landed on it.
+        // The opponent must discover the same hex independently.
+        private readonly HashSet<HexCoordinate> discoveredEngagementHexes = new();
+        public IReadOnlyCollection<HexCoordinate> DiscoveredEngagementHexes => discoveredEngagementHexes;
+        public void DiscoverHex(HexCoordinate coordinate) => discoveredEngagementHexes.Add(coordinate);
 
         public Player(string id, string displayName, Ship ship)
         {

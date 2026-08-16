@@ -7,7 +7,9 @@ namespace StarBound.Movement
         None,
         DieAlreadySpent,
         TargetNotAdjacent,
-        TargetTerrainMismatch
+        TargetTerrainMismatch,
+        WormholeDeviceRequired,
+        InsufficientFundsForToll
     }
 
     public readonly struct MoveResult

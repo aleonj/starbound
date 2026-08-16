@@ -1,9 +1,11 @@
 using System;
+using System.Linq;
 using NUnit.Framework;
 using StarBound.Combat;
 using StarBound.Core;
 using StarBound.Movement;
 using StarBound.Multiplayer;
+using StarBound.Shop;
 
 namespace StarBound.Tests
 {
@@ -126,6 +128,17 @@ namespace StarBound.Tests
 
             Assert.IsTrue(match.IsInEngagement);
             Assert.IsNotNull(match.ActiveEngagement);
+        }
+
+        [Test]
+        public void Move_OntoEngagementHex_MarksItDiscoveredForTheMovingPlayer()
+        {
+            var (match, p1, _) = BuildMatch();
+            match.RollDice(new Random(1));
+
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            CollectionAssert.Contains(p1.DiscoveredEngagementHexes.ToList(), new HexCoordinate(0, -1));
         }
 
         [Test]
@@ -416,8 +429,8 @@ namespace StarBound.Tests
 
             match.EndTurn();
 
-            Assert.IsFalse(match.CanShop); // new turn — must roll dice first
-            match.RollDice(new Random(1));
+            // New turn — fresh budget, and CanShop no longer requires
+            // having rolled dice (see CanShop's doc comment).
             Assert.IsTrue(match.CanShop);
         }
 
@@ -443,35 +456,45 @@ namespace StarBound.Tests
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
             match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1));
 
-            // (2, 0) is ordinary ClearSpace, not a planet — movement should
-            // still be open, since only an engagement or EnterMarket locks it.
+            // (2, 0) is ordinary ClearSpace, not a planet — movement stays
+            // open the whole turn once paid for, regardless of terrain.
             Assert.IsTrue(match.CanMove);
         }
 
         [Test]
-        public void EnterMarket_LocksMovementForRestOfTurn()
+        public void BuyItem_AfterMoving_ClosesTheMoveSessionEvenWithNoActionsSpentOnItAgain()
         {
-            var (match, _) = BuildPlanetContinuationMatch();
+            // "Move to a planet, then buy something" from the user's turn-
+            // economy rule. Move paid for its own action, but choosing to
+            // shop afterward closes that Move session out for the rest of
+            // the turn — movement doesn't come back even though shopping
+            // only spent the turn's other action.
+            var (match, p1) = BuildPlanetContinuationMatch();
             match.RollDice(new Random(1));
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
 
-            Assert.IsTrue(match.CanMove);
+            Assert.AreEqual(1, match.ActionsRemaining);
 
-            match.EnterMarket();
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.AddMoney(50);
+            var result = match.BuyItem(item);
 
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(0, match.ActionsRemaining);
             Assert.IsFalse(match.CanMove);
             Assert.Throws<InvalidOperationException>(() =>
                 match.Move(new RolledDie(1, TerrainType.ClearSpace), new HexCoordinate(2, 0), new Random(1)));
-            Assert.IsTrue(match.CanEndTurn);
         }
 
         [Test]
-        public void CanShop_FalseBeforeRollingDice_EvenWhenAlreadyOnAPlanet()
+        public void CanShop_TrueEvenBeforeRollingDice()
         {
             // Covers starting a turn already docked (e.g. match start, per
             // MatchFactory's per-player planet starts, or having ended a
-            // prior turn on a planet) — shopping still requires taking an
-            // action (rolling dice) first, not just standing on the hex.
+            // prior turn on a planet) — a player who doesn't intend to
+            // move at all shouldn't be forced to roll movement dice just
+            // to shop. The action budget (not a dice-roll prerequisite) is
+            // what stops a "free" turn.
             var map = new GameMap(radius: 2, Difficulty.Medium);
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
             map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace));
@@ -481,13 +504,14 @@ namespace StarBound.Tests
             var match = new Match(map, p1, p2);
 
             Assert.IsTrue(match.IsCurrentPlayerOnPlanet);
-            Assert.IsFalse(match.CanShop);
-            Assert.Throws<InvalidOperationException>(() => match.EnterMarket());
-
-            match.RollDice(new Random(1));
-
+            Assert.IsNull(match.CurrentHand);
             Assert.IsTrue(match.CanShop);
-            Assert.DoesNotThrow(() => match.EnterMarket());
+
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.AddMoney(50);
+            var result = match.BuyItem(item);
+
+            Assert.IsTrue(result.Success);
         }
 
         [Test]
@@ -570,7 +594,7 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void DeliverJob_AwardsRewardClearsJobAndLocksMovement()
+        public void DeliverJob_AwardsRewardClearsJobAndPaysForOneAction()
         {
             var (match, p1, _) = BuildMatch();
             var job = new JobDefinition(JobType.Transport, new HexCoordinate(2, 0), 60);
@@ -585,7 +609,8 @@ namespace StarBound.Tests
 
             Assert.AreEqual(60, p1.Ship.Money);
             Assert.IsNull(p1.ActiveJob);
-            Assert.IsFalse(match.CanMove);
+            Assert.AreEqual(1, match.ActionsRemaining);
+            Assert.IsTrue(match.CanMove); // one action still available, e.g. to move afterward
         }
 
         [Test]
@@ -625,7 +650,7 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void MineAsteroid_SetsHasMinedCargoAndLocksMovement()
+        public void MineAsteroid_SetsHasMinedCargoAndPaysForOneAction()
         {
             var map = new GameMap(radius: 2, Difficulty.Medium);
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Asteroids));
@@ -638,7 +663,8 @@ namespace StarBound.Tests
             match.MineAsteroid();
 
             Assert.IsTrue(p1.HasMinedCargo);
-            Assert.IsFalse(match.CanMove);
+            Assert.AreEqual(1, match.ActionsRemaining);
+            Assert.IsTrue(match.CanMove); // one action still available
         }
 
         [Test]
@@ -745,6 +771,392 @@ namespace StarBound.Tests
             match.ResolveActiveEngagement(new Random(1));
 
             Assert.IsNull(p1.ActiveJob);
+        }
+
+        // p1 holds the Wormhole Device by default — CanTravelWormhole now
+        // requires it unconditionally, regardless of position.
+        private static (Match match, Player p1) BuildWormholeMatch()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(3, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace));
+
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            p1.Ship.TryAddItem(ItemPool.WormholeDevice);
+
+            return (new Match(map, p1, p2), p1);
+        }
+
+        [Test]
+        public void CanTravelWormhole_TrueWhenStandingOnAWormholeWithDiceRolled()
+        {
+            var (match, _) = BuildWormholeMatch();
+            match.RollDice(new Random(1));
+
+            Assert.IsTrue(match.CanTravelWormhole);
+        }
+
+        [Test]
+        public void CanTravelWormhole_TrueEvenBeforeRollingDice()
+        {
+            // A player who doesn't intend to move shouldn't be forced to
+            // roll movement dice just to travel.
+            var (match, _) = BuildWormholeMatch();
+
+            Assert.IsNull(match.CurrentHand);
+            Assert.IsTrue(match.CanTravelWormhole);
+        }
+
+        [Test]
+        public void CanTravelWormhole_TrueEvenWhenNotOnAWormholeHex()
+        {
+            // Deliberately NOT tied to standing on a wormhole hex — an
+            // expensive device purchase shouldn't be unusable for turns at
+            // a time just because the player hasn't happened to land on
+            // one. (0, 0) here is ordinary ClearSpace.
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.TryAddItem(ItemPool.WormholeDevice);
+
+            Assert.IsTrue(match.CanTravelWormhole);
+        }
+
+        [Test]
+        public void CanTravelWormhole_FalseWithoutTheDevice()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(3, 0), TerrainType.Wormhole));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+
+            Assert.IsFalse(match.CanTravelWormhole);
+        }
+
+        [Test]
+        public void OtherWormholeDestinations_ExcludesTheCurrentHex()
+        {
+            var (match, _) = BuildWormholeMatch();
+
+            CollectionAssert.AreEquivalent(
+                new[] { new HexCoordinate(3, 0) },
+                match.OtherWormholeDestinations.ToList());
+        }
+
+        [Test]
+        public void TravelToWormhole_UpdatesPositionAndPaysForOneAction()
+        {
+            var (match, p1) = BuildWormholeMatch();
+            match.RollDice(new Random(1));
+
+            match.TravelToWormhole(new HexCoordinate(3, 0), new Random(1));
+
+            Assert.AreEqual(new HexCoordinate(3, 0), p1.Position);
+            Assert.AreEqual(1, match.ActionsRemaining);
+            Assert.IsTrue(match.CanMove); // one action still available
+        }
+
+        [Test]
+        public void TravelToWormhole_TwiceInOneTurn_SecondJumpIsFreeAsPartOfTheSameMoveSession()
+        {
+            // Wormhole travel shares the Move session — a second jump
+            // right after the first is just more movement, not a
+            // separate action, same as spending a second die would be.
+            var map = new GameMap(radius: 6, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(3, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(6, 0), TerrainType.Wormhole));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.TryAddItem(ItemPool.WormholeDevice);
+            match.RollDice(new Random(1));
+
+            match.TravelToWormhole(new HexCoordinate(3, 0), new Random(1));
+            Assert.AreEqual(1, match.ActionsRemaining);
+
+            match.TravelToWormhole(new HexCoordinate(6, 0), new Random(1));
+
+            Assert.AreEqual(new HexCoordinate(6, 0), p1.Position);
+            Assert.AreEqual(1, match.ActionsRemaining); // still just the one Move action
+            Assert.IsTrue(match.CanTravelWormhole); // session stays open — could jump again
+        }
+
+        [Test]
+        public void TravelToWormhole_ThenDieMove_BothShareTheSameMoveAction()
+        {
+            // Mixing a wormhole jump with ordinary dice movement in either
+            // order within one turn should still be just the one action.
+            var map = new GameMap(radius: 6, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(3, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(4, 0), TerrainType.ClearSpace));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.TryAddItem(ItemPool.WormholeDevice);
+            match.RollDice(new Random(1));
+
+            match.TravelToWormhole(new HexCoordinate(3, 0), new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(4, 0), new Random(1));
+
+            Assert.AreEqual(new HexCoordinate(4, 0), p1.Position);
+            Assert.AreEqual(1, match.ActionsRemaining);
+        }
+
+        [Test]
+        public void TravelToWormhole_ThrowsForANonWormholeDestination()
+        {
+            var (match, _) = BuildWormholeMatch();
+            match.RollDice(new Random(1));
+
+            Assert.Throws<InvalidOperationException>(() =>
+                match.TravelToWormhole(new HexCoordinate(1, 0), new Random(1)));
+        }
+
+        [Test]
+        public void TravelToWormhole_ThrowsForTheCurrentHexAsDestination()
+        {
+            var (match, _) = BuildWormholeMatch();
+            match.RollDice(new Random(1));
+
+            Assert.Throws<InvalidOperationException>(() =>
+                match.TravelToWormhole(new HexCoordinate(0, 0), new Random(1)));
+        }
+
+        [Test]
+        public void TravelToWormhole_ThrowsWhenNotEligible()
+        {
+            var (match, _) = BuildWormholeMatch();
+            match.AttackOpponent(); // p1/p2 share (0,0) in this fixture — starts a fight, which blocks travel
+
+            Assert.Throws<InvalidOperationException>(() =>
+                match.TravelToWormhole(new HexCoordinate(3, 0), new Random(1)));
+        }
+
+        [Test]
+        public void TravelToWormhole_DiscoversAndTriggersAnEngagementAtTheDestination()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(3, 0), TerrainType.Wormhole) { Engagement = EngagementTier.Easy });
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.TryAddItem(ItemPool.WormholeDevice);
+            match.RollDice(new Random(1));
+
+            match.TravelToWormhole(new HexCoordinate(3, 0), new Random(1));
+
+            Assert.IsTrue(match.IsInEngagement);
+            CollectionAssert.Contains(p1.DiscoveredEngagementHexes.ToList(), new HexCoordinate(3, 0));
+        }
+
+        [Test]
+        public void BuyItem_SecondPurchaseInSameVisit_IsFree()
+        {
+            var (match, p1, _) = BuildMatch();
+            match.RollDice(new Random(1));
+            p1.Ship.AddMoney(1000);
+            var item1 = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            var item2 = new ItemDefinition("Shield Booster", CoreStat.Shields, 1, 50, ItemKind.Permanent);
+
+            match.BuyItem(item1);
+            Assert.AreEqual(1, match.ActionsRemaining);
+
+            match.BuyItem(item2);
+
+            Assert.AreEqual(1, match.ActionsRemaining); // still just the one bundled market action
+        }
+
+        [Test]
+        public void AcceptJob_AfterAlreadyShopping_SpendsTheOtherAction()
+        {
+            // Buying something and accepting a job are two separate
+            // actions, not one bundled market visit — matches the
+            // playtesting report that this combo shouldn't leave a third
+            // action (e.g. moving) available afterward.
+            var (match, p1, _) = BuildMatch();
+            match.RollDice(new Random(1));
+            p1.Ship.AddMoney(50);
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            match.BuyItem(item);
+            Assert.AreEqual(1, match.ActionsRemaining);
+
+            var job = new JobDefinition(JobType.Transport, new HexCoordinate(2, 0), 60);
+            var result = match.AcceptJob(job);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(0, match.ActionsRemaining);
+            Assert.IsFalse(match.CanMove);
+        }
+
+        [Test]
+        public void AcceptJob_BeforeMoving_StillLeavesMoveAvailable()
+        {
+            var (match, _, _) = BuildMatch();
+            match.RollDice(new Random(1));
+            var job = new JobDefinition(JobType.Transport, new HexCoordinate(2, 0), 60);
+
+            var result = match.AcceptJob(job);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(1, match.ActionsRemaining);
+            Assert.IsTrue(match.CanMove);
+        }
+
+        [Test]
+        public void Move_ThenBuyItem_ThenAcceptJob_IsBlockedOnTheThirdAction()
+        {
+            // Reproduces the exact playtesting reports: move + buy leaves
+            // no room for a job, and buy + job leaves no room to move.
+            var (match, p1, _) = BuildMatch();
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            p1.Ship.AddMoney(50);
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            match.BuyItem(item);
+
+            Assert.AreEqual(0, match.ActionsRemaining);
+            Assert.IsFalse(match.CanAcceptJob);
+            Assert.Throws<InvalidOperationException>(() =>
+                match.AcceptJob(new JobDefinition(JobType.Transport, new HexCoordinate(2, 0), 60)));
+        }
+
+        [Test]
+        public void BuyItem_Fails_DoesNotSpendAnAction()
+        {
+            var (match, _, _) = BuildMatch();
+            match.RollDice(new Random(1));
+            var tooExpensive = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 999_999, ItemKind.Permanent);
+
+            var result = match.BuyItem(tooExpensive);
+
+            Assert.IsFalse(result.Success);
+            Assert.AreEqual(Match.ActionsPerTurn, match.ActionsRemaining);
+        }
+
+        [Test]
+        public void ActionBudget_ExhaustedAfterTwoActions_BlocksEveryRemainingAction()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.Asteroids));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.PlanetOrStarport));
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.AcceptJob(new JobDefinition(JobType.Mining, new HexCoordinate(1, 0), 50));
+            var tradedItem = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(tradedItem);
+            p1.Ship.TryAddItem(ItemPool.WormholeDevice); // so the CanTravelWormhole check below is meaningful
+            p2.Ship.AddMoney(100);
+
+            match.RollDice(new Random(1));
+            match.TradeItemToOpponent(tradedItem); // action 1
+            Assert.AreEqual(1, match.ActionsRemaining);
+
+            match.MineAsteroid(); // action 2
+
+            Assert.AreEqual(0, match.ActionsRemaining);
+            Assert.IsFalse(match.CanMove);
+            Assert.IsFalse(match.CanShop);
+            Assert.IsFalse(match.CanAcceptJob);
+            Assert.IsFalse(match.CanAttackOpponent); // still shares a hex with p2
+            Assert.IsFalse(match.CanTravelWormhole);
+
+            var anotherItem = new ItemDefinition("Shield Booster", CoreStat.Shields, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(anotherItem);
+            Assert.IsFalse(match.CanTradeWithOpponent(anotherItem));
+
+            // Using a consumable is the one thing that stays free regardless.
+            var consumable = new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 100, ItemKind.Consumable);
+            p1.Ship.TryAddItem(consumable);
+            Assert.IsTrue(match.CanUseItem(consumable));
+        }
+
+        [Test]
+        public void Move_TriggersEngagement_ZeroesActionsRemainingRegardlessOfPriorSpend()
+        {
+            var (match, p1, p2) = BuildMatch();
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item);
+            p2.Ship.AddMoney(100);
+
+            match.RollDice(new Random(1));
+            match.TradeItemToOpponent(item); // uses 1 of 2 actions
+            Assert.AreEqual(1, match.ActionsRemaining);
+
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            Assert.IsTrue(match.IsInEngagement);
+            Assert.AreEqual(0, match.ActionsRemaining); // ambush spends whatever's left, not just +1
+        }
+
+        [Test]
+        public void AttackOpponent_ZeroesActionsRemainingEvenWithNoPriorSpend()
+        {
+            var (match, _, _) = BuildMatch();
+
+            match.AttackOpponent();
+
+            Assert.AreEqual(0, match.ActionsRemaining);
+        }
+
+        [Test]
+        public void TradeItemToOpponent_SpendsOneAction()
+        {
+            var (match, p1, p2) = BuildMatch();
+            var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item);
+            p2.Ship.AddMoney(100);
+
+            match.TradeItemToOpponent(item);
+
+            Assert.AreEqual(1, match.ActionsRemaining);
+        }
+
+        [Test]
+        public void TradeItemToOpponent_Twice_SpendsBothActions()
+        {
+            var (match, p1, p2) = BuildMatch();
+            var item1 = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            var item2 = new ItemDefinition("Shield Booster", CoreStat.Shields, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item1);
+            p1.Ship.TryAddItem(item2);
+            p2.Ship.AddMoney(100);
+
+            match.TradeItemToOpponent(item1);
+            Assert.AreEqual(1, match.ActionsRemaining);
+
+            match.TradeItemToOpponent(item2);
+
+            Assert.AreEqual(0, match.ActionsRemaining);
+            Assert.IsFalse(match.CanTradeWithOpponent(item2));
+        }
+
+        [Test]
+        public void UseItem_StillWorksAfterActionBudgetIsExhausted()
+        {
+            var (match, p1, p2) = BuildMatch();
+            var item1 = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            var item2 = new ItemDefinition("Shield Booster", CoreStat.Shields, 1, 50, ItemKind.Permanent);
+            p1.Ship.TryAddItem(item1);
+            p1.Ship.TryAddItem(item2);
+            p2.Ship.AddMoney(100);
+            match.TradeItemToOpponent(item1);
+            match.TradeItemToOpponent(item2);
+            Assert.AreEqual(0, match.ActionsRemaining);
+
+            var consumable = new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 100, ItemKind.Consumable);
+            p1.Ship.TryAddItem(consumable);
+            p1.Ship.ApplyStatDelta(CoreStat.Hull, -2);
+
+            Assert.IsTrue(match.CanUseItem(consumable));
+            match.UseItem(consumable);
+
+            Assert.AreEqual(3, p1.Ship.GetStat(CoreStat.Hull));
         }
     }
 }

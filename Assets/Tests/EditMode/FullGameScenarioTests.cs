@@ -142,14 +142,13 @@ namespace StarBound.Tests
             var moneyBeforeShopping = p1.Ship.Money;
 
             match.RollDice(new Random(1));
-            match.EnterMarket();
 
             var item = ItemPool.Items.First(i => i.Kind == ItemKind.Permanent && i.AffectedStat == CoreStat.Weapons);
-            var purchase = ShopService.TryPurchase(p1.Ship, item);
+            var purchase = match.BuyItem(item);
             Assert.IsTrue(purchase.Success);
-            Assert.AreEqual(3 + item.StatDelta, p1.Ship.GetStat(CoreStat.Weapons));
+            Assert.AreEqual(3 + item.StatDelta!.Value, p1.Ship.GetStat(CoreStat.Weapons));
 
-            var sale = ShopService.TrySell(p1.Ship, item);
+            var sale = match.SellItem(item);
             Assert.IsTrue(sale.Success);
 
             Assert.AreEqual(3, p1.Ship.GetStat(CoreStat.Weapons)); // bonus gone once sold
@@ -227,6 +226,101 @@ namespace StarBound.Tests
             Assert.AreEqual(3, p1.Ship.GetStat(CoreStat.Hull));
             Assert.AreEqual(0, p1.Ship.HeldItems.Count);
             Assert.IsTrue(match.IsInEngagement); // using the item didn't resolve or end the fight
+        }
+
+        [Test]
+        public void DiscoveryThenWormholeTravel_EscapedMarkerStaysDiscoveredAndDeviceUnlocksTravel()
+        {
+            var map = new GameMap(radius: 6, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            map.SetHex(new Hex(new HexCoordinate(5, 0), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(6, 0), TerrainType.Wormhole));
+
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.AddMoney(1000);
+
+            // Buy the device before setting off.
+            match.RollDice(new Random(1));
+            var purchase = match.BuyItem(ItemPool.WormholeDevice);
+            Assert.IsTrue(purchase.Success);
+            match.EndTurn();
+            match.EndTurn();
+
+            // Land on the marked hex and escape — discovery should survive
+            // the escape (only a win clears a marker from view).
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            Assert.IsTrue(match.IsInEngagement);
+            match.ActiveEngagement.AttemptEscape(new Random(1));
+            Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome);
+            match.ResolveActiveEngagement(new Random(1));
+
+            CollectionAssert.Contains(p1.DiscoveredEngagementHexes.ToList(), new HexCoordinate(1, 0));
+
+            match.EndTurn();
+            match.EndTurn();
+
+            // Travel via wormhole using the device bought earlier — from
+            // wherever the escape happened to leave the player, with no
+            // need to ever have physically reached a wormhole hex first.
+            match.RollDice(new Random(1));
+            Assert.IsTrue(match.CanTravelWormhole);
+
+            match.TravelToWormhole(new HexCoordinate(5, 0), new Random(1));
+
+            Assert.AreEqual(new HexCoordinate(5, 0), p1.Position);
+        }
+
+        [Test]
+        public void TurnEconomy_ShopThenMoveAndMoveThenShop_BothOrderingsWorkAcrossTwoTurns()
+        {
+            var (match, p1, _) = BuildScenarioMatch();
+            p1.Ship.AddMoney(200);
+            var item = ItemPool.Items.First(i => i.Kind == ItemKind.Permanent && i.AffectedStat == CoreStat.Weapons);
+
+            // Turn 1: "take a job or buy something from the shop, and then move."
+            match.RollDice(new Random(1));
+            var purchase = match.BuyItem(item);
+            Assert.IsTrue(purchase.Success);
+            Assert.AreEqual(1, match.ActionsRemaining);
+
+            var move = match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+            Assert.IsTrue(move.Success);
+            Assert.AreEqual(0, match.ActionsRemaining);
+            Assert.IsTrue(match.CanEndTurn);
+
+            match.EndTurn(); // p2's turn — passes without acting
+            match.EndTurn(); // back to p1, fresh turn
+
+            // Turn 2: "move to a planet and then take a job or buy something."
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.Asteroids), new HexCoordinate(2, 0), new Random(1));
+            match.Move(new RolledDie(1, TerrainType.PlanetOrStarport), new HexCoordinate(3, 0), new Random(1));
+            Assert.AreEqual(1, match.ActionsRemaining); // Move paid once — both dice were free after
+
+            Assert.IsTrue(match.CanShop);
+            var secondPurchase = match.BuyItem(item);
+            Assert.IsTrue(secondPurchase.Success);
+            Assert.AreEqual(0, match.ActionsRemaining);
+
+            // The market session stays open (buying a second item here is
+            // still free — it's the same visit), but choosing to shop
+            // closed out the Move session, so movement is done for the
+            // turn even though it was already paid for once.
+            Assert.IsTrue(match.CanShop);
+            Assert.IsFalse(match.CanMove);
+            var thirdPurchase = match.BuyItem(item);
+            Assert.IsTrue(thirdPurchase.Success);
+            Assert.AreEqual(0, match.ActionsRemaining);
+
+            // A genuinely new, unpaid category (e.g. attacking) is blocked
+            // once the budget is exhausted.
+            Assert.IsFalse(match.CanAttackOpponent);
+            Assert.IsTrue(match.CanEndTurn);
         }
     }
 }

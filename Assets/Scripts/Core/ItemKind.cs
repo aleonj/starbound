@@ -9,6 +9,11 @@ namespace StarBound.Core
         // Inert until used. Using it permanently applies its stat delta
         // to the base stat and removes the item — a used consumable
         // can't be resold or traded, unlike an unused one.
-        Consumable
+        Consumable,
+
+        // No stat effect at all — held items of this kind gate a
+        // capability (e.g. the Wormhole Device) rather than boosting a
+        // CoreStat. AffectedStat/StatDelta are always null for this kind.
+        Unlock
     }
 }

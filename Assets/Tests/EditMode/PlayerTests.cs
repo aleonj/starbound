@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using NUnit.Framework;
 using StarBound.Core;
 
@@ -105,6 +106,29 @@ namespace StarBound.Tests
             player.AcceptJob(new JobDefinition(JobType.Mining, new HexCoordinate(2, 0), 50));
 
             Assert.IsFalse(player.HasMinedCargo);
+        }
+
+        [Test]
+        public void DiscoverHex_AddsToDiscoveredEngagementHexes()
+        {
+            var player = new Player("p1", "Adam", new Ship(cargoCapacity: 3));
+            var coordinate = new HexCoordinate(2, -1);
+
+            player.DiscoverHex(coordinate);
+
+            Assert.Contains(coordinate, player.DiscoveredEngagementHexes.ToList());
+        }
+
+        [Test]
+        public void DiscoverHex_SameHexTwice_DoesNotDuplicate()
+        {
+            var player = new Player("p1", "Adam", new Ship(cargoCapacity: 3));
+            var coordinate = new HexCoordinate(2, -1);
+
+            player.DiscoverHex(coordinate);
+            player.DiscoverHex(coordinate);
+
+            Assert.AreEqual(1, player.DiscoveredEngagementHexes.Count);
         }
     }
 }

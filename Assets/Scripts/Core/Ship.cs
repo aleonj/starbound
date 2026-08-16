@@ -44,7 +44,7 @@ namespace StarBound.Core
         public int GetStat(CoreStat stat) =>
             stats[stat] + heldItems
                 .Where(item => item.Kind == ItemKind.Permanent && item.AffectedStat == stat)
-                .Sum(item => item.StatDelta);
+                .Sum(item => item.StatDelta ?? 0);
 
         public void ApplyStatDelta(CoreStat stat, int delta)
         {
@@ -100,7 +100,7 @@ namespace StarBound.Core
             if (!heldItems.Remove(item))
                 throw new InvalidOperationException("This item isn't held.");
 
-            ApplyStatDelta(item.AffectedStat, item.StatDelta);
+            ApplyStatDelta(item.AffectedStat!.Value, item.StatDelta!.Value);
         }
 
         // Floors at zero, same convention as ApplyStatDelta — used for
