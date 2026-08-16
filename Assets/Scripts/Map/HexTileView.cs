@@ -11,7 +11,18 @@ namespace StarBound.Map
         private static readonly Dictionary<float, Mesh> MarkerMeshCache = new();
         private static readonly Dictionary<float, Mesh> HighlightMeshCache = new();
 
-        public void Initialize(TerrainType terrain, EngagementTier tier, float hexRadius, HexHighlightState highlightState = HexHighlightState.None)
+        private MeshRenderer highlightRenderer;
+        private MeshRenderer markerRenderer;
+
+        // Called once per tile GameObject, ever — see MapView.Render,
+        // which reuses the same HexTileView instance across repeated
+        // Render calls instead of destroying/recreating it, so that
+        // per-tile animation state (planet rotation, shader time, etc.
+        // from future living-galaxy effects) survives a move/turn.
+        // Highlight/marker children are always created up front (just
+        // inactive) so SetState below never has to create or destroy a
+        // GameObject — only toggle/repaint the ones that already exist.
+        public void Initialize(TerrainType terrain, float hexRadius)
         {
             var meshFilter = GetComponent<MeshFilter>();
             meshFilter.sharedMesh = GetOrCreate(HexMeshCache, hexRadius * 0.95f);
@@ -20,31 +31,41 @@ namespace StarBound.Map
             meshRenderer.sharedMaterial = TerrainMaterials.Get(terrain);
             meshRenderer.sortingOrder = 0;
 
-            if (highlightState != HexHighlightState.None)
-            {
-                // Larger and drawn behind the tile, so only its edge shows —
-                // reads as a glowing border rather than obscuring the tile.
-                var highlight = new GameObject("Highlight", typeof(MeshFilter), typeof(MeshRenderer));
-                highlight.transform.SetParent(transform, false);
-                highlight.GetComponent<MeshFilter>().sharedMesh = GetOrCreate(HighlightMeshCache, hexRadius * 1.15f);
-
-                var highlightRenderer = highlight.GetComponent<MeshRenderer>();
-                highlightRenderer.sharedMaterial = highlightState == HexHighlightState.Pending
-                    ? HighlightMaterials.PendingHighlight
-                    : HighlightMaterials.TargetHighlight;
-                highlightRenderer.sortingOrder = -1;
-            }
-
-            if (tier == EngagementTier.None)
-                return;
+            // Larger and drawn behind the tile, so only its edge shows —
+            // reads as a glowing border rather than obscuring the tile.
+            var highlight = new GameObject("Highlight", typeof(MeshFilter), typeof(MeshRenderer));
+            highlight.transform.SetParent(transform, false);
+            highlight.GetComponent<MeshFilter>().sharedMesh = GetOrCreate(HighlightMeshCache, hexRadius * 1.15f);
+            highlightRenderer = highlight.GetComponent<MeshRenderer>();
+            highlightRenderer.sortingOrder = -1;
+            highlight.SetActive(false);
 
             var marker = new GameObject("EngagementMarker", typeof(MeshFilter), typeof(MeshRenderer));
             marker.transform.SetParent(transform, false);
             marker.GetComponent<MeshFilter>().sharedMesh = GetOrCreate(MarkerMeshCache, hexRadius * 0.35f);
-
-            var markerRenderer = marker.GetComponent<MeshRenderer>();
-            markerRenderer.sharedMaterial = EngagementMaterials.Get(tier);
+            markerRenderer = marker.GetComponent<MeshRenderer>();
             markerRenderer.sortingOrder = 1;
+            marker.SetActive(false);
+        }
+
+        // Called on every Render pass after the first — repaints the
+        // existing tile/highlight/marker in place, no GameObjects created
+        // or destroyed.
+        public void SetState(TerrainType terrain, EngagementTier tier, HexHighlightState highlightState)
+        {
+            GetComponent<MeshRenderer>().sharedMaterial = TerrainMaterials.Get(terrain);
+
+            highlightRenderer.gameObject.SetActive(highlightState != HexHighlightState.None);
+            if (highlightState != HexHighlightState.None)
+            {
+                highlightRenderer.sharedMaterial = highlightState == HexHighlightState.Pending
+                    ? HighlightMaterials.PendingHighlight
+                    : HighlightMaterials.TargetHighlight;
+            }
+
+            markerRenderer.gameObject.SetActive(tier != EngagementTier.None);
+            if (tier != EngagementTier.None)
+                markerRenderer.sharedMaterial = EngagementMaterials.Get(tier);
         }
 
         // `== null` (not just TryGetValue) because a destroyed

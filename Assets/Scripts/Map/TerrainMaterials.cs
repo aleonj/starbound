@@ -4,8 +4,9 @@ using StarBound.Core;
 
 namespace StarBound.Map
 {
-    // Solid-color placeholder materials per terrain type, standing in for
-    // real art. Colors are cached per terrain, shared across all tiles.
+    // Per-terrain tinted glass-hex materials (see Assets/Shaders/GlassHex.shader)
+    // — placeholder colors standing in for real per-terrain art, but no
+    // longer flat solid color. Cached per terrain, shared across all tiles.
     public static class TerrainMaterials
     {
         private static readonly Dictionary<TerrainType, Color> Colors = new()
@@ -18,6 +19,16 @@ namespace StarBound.Map
             { TerrainType.Mines, new Color(0.85f, 0.20f, 0.20f) },
             { TerrainType.Debris, new Color(0.80f, 0.50f, 0.20f) },
         };
+
+        // Every terrain gets the plain glass look unless overridden here —
+        // each per-terrain living-galaxy story (asteroid flow, mines,
+        // wormhole, tradelane, planet) adds one entry plus its own shader.
+        private static readonly Dictionary<TerrainType, string> ShaderNames = new()
+        {
+            { TerrainType.Asteroids, "StarBound/AsteroidFlow" },
+        };
+
+        private const string DefaultShaderName = "StarBound/GlassHex";
 
         private static readonly Dictionary<TerrainType, Material> Cache = new();
 
@@ -32,17 +43,17 @@ namespace StarBound.Map
             // us recreate the material instead of handing back a dead one.
             if (!Cache.TryGetValue(terrain, out var material) || material == null)
             {
-                material = CreateMaterial(Colors[terrain]);
+                var shaderName = ShaderNames.GetValueOrDefault(terrain, DefaultShaderName);
+                material = CreateMaterial(shaderName, Colors[terrain]);
                 Cache[terrain] = material;
             }
 
             return material;
         }
 
-        private static Material CreateMaterial(Color color) => new(Shader.Find("Sprites/Default"))
+        private static Material CreateMaterial(string shaderName, Color color) => new(Shader.Find(shaderName))
         {
-            color = color,
-            mainTexture = Texture2D.whiteTexture
+            color = color
         };
     }
 }

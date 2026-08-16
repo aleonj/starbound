@@ -32,6 +32,11 @@ namespace StarBound.Demo
         private float hexRadius;
         private Random rng;
         private MapConfirmationUI confirmationUI;
+        private TurnHandoffScreen handoffScreen;
+        private WinScreen winScreen;
+        private Action onNewMatch;
+        private bool awaitingHandoff;
+        private bool winScreenShown;
 
         private GameObject playerOneMarker;
         private GameObject playerTwoMarker;
@@ -47,16 +52,38 @@ namespace StarBound.Demo
         private readonly List<string> combatLog = new();
         private GUIStyle headerStyle;
 
-        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, MapConfirmationUI confirmationUI)
+        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, MapConfirmationUI confirmationUI, TurnHandoffScreen handoffScreen, WinScreen winScreen, Action onNewMatch)
         {
             this.match = match;
             this.mapView = mapView;
             this.markersParent = markersParent;
             this.hexRadius = hexRadius;
             this.confirmationUI = confirmationUI;
+            this.handoffScreen = handoffScreen;
+            this.winScreen = winScreen;
+            this.onNewMatch = onNewMatch;
             rng = new Random();
 
             CreateShipMarkers();
+            RefreshView();
+            // Even the very first turn goes through hand-off — one code
+            // path instead of special-casing match start.
+            ShowHandoffForCurrentPlayer();
+        }
+
+        // Hides the whole board (see OnGUI's awaitingHandoff guard) behind
+        // a full-screen "pass the device" confirmation for whichever
+        // player's turn is starting — see TurnHandoffScreen.
+        private void ShowHandoffForCurrentPlayer()
+        {
+            awaitingHandoff = true;
+            handoffScreen.Show(match.CurrentPlayer, OnHandoffConfirmed);
+        }
+
+        private void OnHandoffConfirmed()
+        {
+            awaitingHandoff = false;
+            handoffScreen.Hide();
             RefreshView();
         }
 
@@ -138,13 +165,31 @@ namespace StarBound.Demo
 
         private void OnGUI()
         {
+            // Nothing from the HUD renders at all while awaiting hand-off
+            // confirmation — guarantees the previous player's board can't
+            // leak through underneath the full-screen TurnHandoffScreen,
+            // and sidesteps any IMGUI/UGUI draw-order ambiguity entirely.
+            if (awaitingHandoff)
+                return;
+
+            // Same reasoning as the awaitingHandoff guard above — nothing
+            // from the IMGUI HUD renders once the match is over, so the
+            // full-screen WinScreen (UGUI) can't have it drawn on top.
+            if (match.IsComplete)
+            {
+                if (!winScreenShown)
+                {
+                    winScreenShown = true;
+                    winScreen.Show(match, onNewMatch);
+                }
+                return;
+            }
+
             headerStyle ??= new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, fontSize = 14 };
 
             GUILayout.BeginArea(HudRect, GUI.skin.box);
 
-            if (match.IsComplete)
-                DrawWinnerPanel();
-            else if (match.IsInEngagement)
+            if (match.IsInEngagement)
                 DrawEngagementPanel();
             else
                 DrawMainPanel();
@@ -287,6 +332,7 @@ namespace StarBound.Demo
                 lastMessage = null;
                 combatLog.Clear();
                 RefreshView();
+                ShowHandoffForCurrentPlayer();
             }
             GUI.enabled = true;
 
@@ -340,7 +386,9 @@ namespace StarBound.Demo
             GUILayout.Space(5);
             GUILayout.Label("-- Shop --", headerStyle);
 
-            foreach (var item in shopOffer)
+            // Snapshot before iterating — same reasoning as DrawHeldItems:
+            // buying can mutate the underlying offer mid-loop.
+            foreach (var item in shopOffer.ToList())
             {
                 if (GUILayout.Button($"Buy {item.Name} — {item.Price}"))
                 {
@@ -685,11 +733,6 @@ namespace StarBound.Demo
             GUILayout.Label("Log:");
             foreach (var line in combatLog)
                 GUILayout.Label(line);
-        }
-
-        private void DrawWinnerPanel()
-        {
-            GUILayout.Label($"{match.Winner.DisplayName} wins the match!", headerStyle);
         }
 
         private static string DescribeEscape(EscapeAttemptResult result) =>

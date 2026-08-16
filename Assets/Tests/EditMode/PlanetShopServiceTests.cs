@@ -73,6 +73,37 @@ namespace StarBound.Tests
             CollectionAssert.IsSubsetOf(stillThere, refilled);
         }
 
+        // Regression test for a real crash: MatchHud.DrawShopPanel does
+        // `foreach (var item in shopOffer) { ...Buy button calls
+        // match.BuyItem(item)... }` — if GetOffer ever hands back the live
+        // hex.ShopOffer list instead of a snapshot, buying mid-loop
+        // mutates the exact collection being enumerated and throws
+        // "Collection was modified". Asserted two ways: the reference
+        // itself, and the actual enumerate-while-mutating scenario.
+        [Test]
+        public void GetOffer_ReturnsASnapshot_NotTheLiveBackingList()
+        {
+            var hex = BuildPlanetHex();
+
+            var offer = PlanetShopService.GetOffer(hex, currentTurn: 1, new Random(1));
+
+            Assert.IsFalse(ReferenceEquals(offer, hex.ShopOffer),
+                "GetOffer must return a copy — a caller holding this result shouldn't see it mutate out from under them.");
+        }
+
+        [Test]
+        public void GetOffer_ThenRecordPurchaseWhileEnumeratingThatResult_DoesNotThrow()
+        {
+            var hex = BuildPlanetHex();
+            var offer = PlanetShopService.GetOffer(hex, currentTurn: 1, new Random(1));
+
+            Assert.DoesNotThrow(() =>
+            {
+                foreach (var item in offer)
+                    PlanetShopService.RecordPurchase(hex, item, currentTurn: 1);
+            });
+        }
+
         [Test]
         public void GetOffer_TwoDifferentHexes_TrackIndependentOffers()
         {
