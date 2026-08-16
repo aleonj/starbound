@@ -20,7 +20,8 @@ namespace StarBound.Map
             GameMap map,
             float hexRadius,
             IReadOnlyCollection<HexCoordinate> highlighted = null,
-            IReadOnlyCollection<HexCoordinate> discoveredEngagementHexes = null)
+            IReadOnlyCollection<HexCoordinate> discoveredEngagementHexes = null,
+            HexCoordinate? pendingTarget = null)
         {
             foreach (Transform child in transform)
                 Destroy(child.gameObject);
@@ -30,14 +31,16 @@ namespace StarBound.Map
 
             foreach (var hex in map.Hexes)
             {
-                var isHighlighted = highlighted.Contains(hex.Coordinate);
+                var highlightState = pendingTarget.HasValue && hex.Coordinate == pendingTarget.Value
+                    ? HexHighlightState.Pending
+                    : highlighted.Contains(hex.Coordinate) ? HexHighlightState.LegalTarget : HexHighlightState.None;
                 var visibleTier = EngagementVisibility.GetVisibleTier(hex, discoveredEngagementHexes);
                 var tileObject = new GameObject(
                     $"Hex ({hex.Coordinate.Q}, {hex.Coordinate.R})",
                     typeof(HexTileView));
                 tileObject.transform.SetParent(transform, false);
                 tileObject.transform.localPosition = HexLayout.AxialToWorld(hex.Coordinate, hexRadius);
-                tileObject.GetComponent<HexTileView>().Initialize(hex.Terrain, visibleTier, hexRadius, isHighlighted);
+                tileObject.GetComponent<HexTileView>().Initialize(hex.Terrain, visibleTier, hexRadius, highlightState);
             }
         }
     }

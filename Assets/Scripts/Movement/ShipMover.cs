@@ -13,7 +13,7 @@ namespace StarBound.Movement
         // atomically with the terrain-match check, before the die is
         // marked spent — there's no "unspend" path, so a blocked move
         // must never reach die.MarkSpent().
-        public static MoveResult TryMove(GameMap map, RolledDie die, Player player, HexCoordinate to)
+        public static MoveResult TryMove(GameMap map, RolledDie die, Player player, HexCoordinate to, bool waiveTradelaneToll = false)
         {
             if (die.IsSpent)
                 return MoveResult.Failed(MoveFailureReason.DieAlreadySpent);
@@ -33,7 +33,7 @@ namespace StarBound.Movement
             if (targetHex.Terrain == TerrainType.Wormhole && !player.Ship.HeldItems.Contains(ItemPool.WormholeDevice))
                 return MoveResult.Failed(MoveFailureReason.WormholeDeviceRequired);
 
-            if (targetHex.Terrain == TerrainType.Tradelane)
+            if (targetHex.Terrain == TerrainType.Tradelane && !waiveTradelaneToll)
             {
                 if (player.Ship.Money < TollPricing.TradelaneTollPerHex)
                     return MoveResult.Failed(MoveFailureReason.InsufficientFundsForToll);

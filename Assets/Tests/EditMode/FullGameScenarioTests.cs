@@ -4,6 +4,7 @@ using NUnit.Framework;
 using StarBound.Combat;
 using StarBound.Core;
 using StarBound.Economy;
+using StarBound.Map;
 using StarBound.Movement;
 using StarBound.Multiplayer;
 using StarBound.Shop;
@@ -190,6 +191,7 @@ namespace StarBound.Tests
             p1.RecordEngagementWin(EngagementTier.Hard);
             p1.RecordEngagementWin(EngagementTier.Hard);
             match.Map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Hard });
+            match.UnlockTier(EngagementTier.Hard); // this test is about the win-counting/victory rule, not progression phasing
 
             p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
             p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
@@ -432,6 +434,7 @@ namespace StarBound.Tests
             var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
             var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
             var match = new Match(map, p1, p2);
+            match.UnlockTier(EngagementTier.Hard); // this test is about grinding out real fights, not progression phasing
             p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
             p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
             p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
@@ -499,6 +502,103 @@ namespace StarBound.Tests
 
             Assert.IsTrue(match.IsInEngagement);
             CollectionAssert.Contains(p2.DiscoveredEngagementHexes.ToList(), new HexCoordinate(1, 0));
+        }
+
+        [Test]
+        public void PhaseGating_InertMediumMarkerStaysInertUntilAProgressionGoalUnlocksIt()
+        {
+            var map = new GameMap(radius: 4, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
+            map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            map.SetHex(new Hex(new HexCoordinate(1, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Medium });
+            // Filler, so a randomly-targeted TravelAndPay goal has plenty
+            // of other places to land besides the Medium marker itself.
+            map.SetHex(new Hex(new HexCoordinate(2, -1), TerrainType.ClearSpace));
+            map.SetHex(new Hex(new HexCoordinate(2, -2), TerrainType.ClearSpace));
+            map.SetHex(new Hex(new HexCoordinate(1, -2), TerrainType.ClearSpace));
+            map.SetHex(new Hex(new HexCoordinate(-1, 0), TerrainType.ClearSpace));
+
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var match = new Match(map, p1, p2);
+            p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+
+            Assert.AreEqual(EngagementTier.Easy, match.MaxUnlockedTier);
+
+            // Win the two pre-placed Easy markers back to back — the
+            // second win crosses the progression threshold and fires an
+            // event (see MatchProgressionService).
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+            PlayOutEngagement(match, new Random(1));
+            match.ResolveActiveEngagement(new Random(1));
+            match.EndTurn();
+            match.EndTurn();
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, -1), new Random(1));
+            PlayOutEngagement(match, new Random(1));
+            match.ResolveActiveEngagement(new Random(1));
+
+            Assert.IsNotNull(match.ActiveGoal);
+            Assert.AreEqual(EngagementTier.Easy, match.MaxUnlockedTier, "An event firing alone doesn't unlock anything — only completing its goal does.");
+
+            // The pre-placed Medium marker is one hop from here — landing
+            // on it now must NOT trigger, even with an event already fired.
+            match.EndTurn();
+            match.EndTurn();
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsFalse(match.IsInEngagement, "Medium is still locked — nothing above it can trigger yet.");
+            Assert.IsTrue(match.Map.TryGetHex(new HexCoordinate(1, 0), out var mediumHex));
+            Assert.IsTrue(mediumHex.HasEngagement, "The marker must survive the visit, ready for once Medium unlocks.");
+            CollectionAssert.DoesNotContain(p1.DiscoveredEngagementHexes.ToList(), new HexCoordinate(1, 0),
+                "A locked-tier marker should stay fully hidden on this visit, not just non-triggering.");
+
+            // Complete whichever goal fired — the exact type is a coin
+            // flip (see MatchProgressionService), so this handles both.
+            var goal = match.ActiveGoal;
+            match.Map.TryGetHex(goal.TargetHex, out var targetHex);
+            var approach = HexMath.Neighbors(goal.TargetHex).First(n => match.Map.TryGetHex(n, out _));
+            p1.Position = approach;
+            if (goal.Type == MatchGoalType.TravelAndPay)
+                p1.Ship.AddMoney(goal.MoneyRequired + 10); // buffer for a possible Tradelane toll — not present on this map, but keeps the pattern consistent
+
+            // Still the same turn, same open Move session — no fresh roll
+            // needed (or allowed) to keep moving.
+            match.Move(new RolledDie(0, targetHex.Terrain), goal.TargetHex, new Random(1));
+
+            if (match.IsInEngagement)
+            {
+                // Either a DefeatNamedTarget goal (its marker sits at the
+                // player's current — still Easy — tier, so it triggers via
+                // ordinary gating, no exemption involved) or TravelAndPay
+                // happened to land straight on the now-freshly-unlocked
+                // Medium marker in this same arrival.
+                PlayOutEngagement(match, new Random(1));
+                match.ResolveActiveEngagement(new Random(1));
+            }
+
+            Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier);
+            Assert.IsNull(match.ActiveGoal);
+
+            if (!match.Map.TryGetHex(new HexCoordinate(1, 0), out var mediumHexAfter) || !mediumHexAfter.HasEngagement)
+                return; // already resolved as part of completing the goal above
+
+            // Revisit the same static marker now that Medium is unlocked.
+            match.EndTurn();
+            match.EndTurn();
+            p1.Position = new HexCoordinate(1, -1);
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsTrue(match.IsInEngagement, "Medium is unlocked now — the same marker must finally trigger.");
+            CollectionAssert.Contains(p1.DiscoveredEngagementHexes.ToList(), new HexCoordinate(1, 0),
+                "Now that Medium is unlocked, this visit should discover it same as any other marker.");
         }
     }
 }

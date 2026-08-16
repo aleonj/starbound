@@ -15,7 +15,7 @@ namespace StarBound.Tests
             map.SetHex(hex);
             var player = new Player("p1", "Test", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
 
-            var session = EngagementTrigger.TryTrigger(player, map, new Random(1));
+            var session = EngagementTrigger.TryTrigger(player, map, new Random(1), EngagementTier.Hard);
 
             Assert.IsNotNull(session);
             Assert.AreEqual(EngagementTier.Medium, session.Definition.Tier);
@@ -28,9 +28,35 @@ namespace StarBound.Tests
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace));
             var player = new Player("p1", "Test", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
 
-            var session = EngagementTrigger.TryTrigger(player, map, new Random(1));
+            var session = EngagementTrigger.TryTrigger(player, map, new Random(1), EngagementTier.Hard);
 
             Assert.IsNull(session);
+        }
+
+        [Test]
+        public void TryTrigger_TierAboveMaxTier_ReturnsNullAndLeavesMarkerInPlace()
+        {
+            var map = new GameMap(radius: 1, Difficulty.Medium);
+            var hex = new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Hard };
+            map.SetHex(hex);
+            var player = new Player("p1", "Test", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+
+            var session = EngagementTrigger.TryTrigger(player, map, new Random(1), EngagementTier.Medium);
+
+            Assert.IsNull(session);
+            Assert.IsTrue(hex.HasEngagement, "An ungated marker should stay on the map for a later visit once unlocked.");
+        }
+
+        [Test]
+        public void TryTrigger_TierAtOrBelowMaxTier_Triggers()
+        {
+            var map = new GameMap(radius: 1, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Medium });
+            var player = new Player("p1", "Test", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+
+            var session = EngagementTrigger.TryTrigger(player, map, new Random(1), EngagementTier.Medium);
+
+            Assert.IsNotNull(session);
         }
 
         [Test]

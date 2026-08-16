@@ -14,22 +14,33 @@ namespace StarBound.Tests
     // with the user to keep routine Test Runner passes fast) isn't doubled
     // by having two [Test] methods each re-run the full batch.
     //
-    // IMPORTANT, verified by actually running this logic outside Unity
-    // (the production gameplay code has no UnityEngine dependency, so it
-    // compiles and runs standalone) before landing it here: with engagement
-    // tiers all available from turn one and no way to avoid a Hard-tier
-    // NPC (roughly double a base player's stats) other than fleeing —
-    // itself a contested roll against the same opponent — a bot with no
-    // deep strategy essentially never reaches match completion. That's not
-    // a bug in this suite; it directly motivated the new
-    // "[Multiplayer] Game progression: phase in Medium/Hard engagements"
-    // backlog story. So completion rate here is a reported balance metric,
-    // not a pass/fail gate — see SimulatedMatches_ReportsBalanceMetrics.
+    // History: this simulator originally found engagement tiers all
+    // available from turn one, with no reliable way to avoid a Hard-tier
+    // NPC (roughly double a base player's stats), meant a bot with no
+    // deep strategy essentially never reached match completion. That
+    // directly motivated the "[Multiplayer] Game progression" story —
+    // Medium/Hard now phase in via Match.MaxUnlockedTier, unlocked by
+    // completing a race-to-complete goal, and RandomMatchBot was updated
+    // to actually chase the active goal (see GoalPursuitWeight) instead
+    // of ignoring it.
+    //
+    // A DefeatNamedTarget goal originally placed its marker at the tier
+    // being unlocked — "prove you're ready for Medium" by beating a
+    // Medium-strength NPC at baseline Easy stats — which was self-defeating
+    // and got fixed (see MatchProgressionService: it now targets the
+    // player's CURRENT tier, a winnable fight). That measurably helps
+    // (verified outside Unity: simulated matches now sometimes reach
+    // Medium, versus never before), but full completion still doesn't
+    // happen within the turn cap — reaching Hard needs a second full
+    // phase transition plus 3 real Hard wins, which this bot's win rate
+    // doesn't sustain in 200 turns. That's broader combat/pacing balance,
+    // not a specific bug, and is being left as a reported finding rather
+    // than chased further this pass — see the [Multiplayer]
+    // game-progression story for the full writeup and status. Completion
+    // rate stays a reported metric, not a pass/fail gate — see
+    // SimulatedMatches_ReportsBalanceMetrics.
     public class MatchSimulationTests
     {
-        // Kept modest deliberately: empirically (see above), a much larger
-        // cap doesn't meaningfully raise the completion rate under today's
-        // rules, so there's no value in spending extra Test Runner time on it.
         private const int TurnCap = 200;
 
         private List<MatchSimulationResult> results;
@@ -115,10 +126,12 @@ namespace StarBound.Tests
             TestContext.WriteLine("=== Random-play balance report ===");
             TestContext.WriteLine("A mildly-strategic-but-not-smart bot's numbers are a \"does the rules");
             TestContext.WriteLine("engine behave sanely across varied play\" signal, NOT a tuned-balance");
-            TestContext.WriteLine("signal — see the [Multiplayer] game-progression backlog story for the");
-            TestContext.WriteLine("balance finding this simulator already surfaced (Hard-tier NPCs roughly");
-            TestContext.WriteLine("double a base player's stats, with no reliable way to avoid a fight once");
-            TestContext.WriteLine("triggered — so low/zero completion here is expected for now, not a bug).");
+            TestContext.WriteLine("signal. The bot chases the active progression goal (see");
+            TestContext.WriteLine("RandomMatchBot.GoalPursuitWeight) and Medium now unlocks in some runs,");
+            TestContext.WriteLine("but full completion still needs a second phase transition to Hard plus");
+            TestContext.WriteLine("3 real Hard wins, which this bot's win rate doesn't sustain within the");
+            TestContext.WriteLine("turn cap — see the [Multiplayer] game-progression story for this");
+            TestContext.WriteLine("finding. Low/zero completion here is expected for now, not a bug.");
             TestContext.WriteLine($"Matches completed: {completed.Count}/{results.Count} ({TurnCap}-turn cap)");
             TestContext.WriteLine($"Turns played — min: {results.Min(r => r.TotalTurns)}, max: {results.Max(r => r.TotalTurns)}, avg: {results.Average(r => r.TotalTurns):F1}");
             TestContext.WriteLine($"Engagements per match — avg: {results.Average(r => r.TotalEngagements):F1}, total: {totalEngagements}");

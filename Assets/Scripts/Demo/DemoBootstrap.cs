@@ -1,8 +1,11 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem.UI;
 using StarBound.Core;
 using StarBound.Economy;
 using StarBound.Map;
 using StarBound.Multiplayer;
+using StarBound.UI;
 
 namespace StarBound.Demo
 {
@@ -39,10 +42,30 @@ namespace StarBound.Demo
             var markersRoot = new GameObject("ShipMarkers");
             markersRoot.transform.SetParent(worldRoot.transform, false);
 
+            EnsureEventSystem();
+            var confirmationUIObject = new GameObject("MapConfirmationUI", typeof(MapConfirmationUI));
+            var confirmationUI = confirmationUIObject.GetComponent<MapConfirmationUI>();
+
             var hudObject = new GameObject("MatchHud", typeof(MatchHud));
-            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius);
+            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius, confirmationUI);
 
             FitCameraToMap(DefaultMapSize.ToRadius(), HexRadius);
+        }
+
+        // UGUI (the new Confirm/Cancel map-move panel) needs an
+        // EventSystem to receive input at all — none exists in this
+        // procedurally-built scene otherwise. Uses the new Input System's
+        // module, matching the InputSystem package already used elsewhere
+        // (see MatchHud's Mouse.current usage).
+        private static void EnsureEventSystem()
+        {
+            // Just need to know one exists — ordering doesn't matter here,
+            // so FindAnyObjectByType (not FindFirstObjectByType) is both
+            // the correct and the faster choice.
+            if (Object.FindAnyObjectByType<EventSystem>() != null)
+                return;
+
+            new GameObject("EventSystem", typeof(EventSystem), typeof(InputSystemUIInputModule));
         }
 
         private static void FitCameraToMap(int radius, float hexRadius)

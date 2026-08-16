@@ -52,5 +52,37 @@ namespace StarBound.Tests
 
             Assert.IsTrue(sawDifferentOffer, "GenerateOffer appears to always return the same fixed slice.");
         }
+
+        [Test]
+        public void GenerateReplacements_ReturnsRequestedCount()
+        {
+            var existing = ShopOfferGenerator.GenerateOffer(new Random(1));
+
+            var replacements = ShopOfferGenerator.GenerateReplacements(new Random(2), 2, existing);
+
+            Assert.AreEqual(2, replacements.Count);
+        }
+
+        [Test]
+        public void GenerateReplacements_NeverDuplicatesAnExcludedItem()
+        {
+            var existing = ShopOfferGenerator.GenerateOffer(new Random(1));
+
+            for (var seed = 0; seed < 20; seed++)
+            {
+                var replacements = ShopOfferGenerator.GenerateReplacements(new Random(seed), 2, existing);
+                CollectionAssert.IsEmpty(replacements.Intersect(existing));
+            }
+        }
+
+        [Test]
+        public void GenerateReplacements_ReturnsDistinctItems()
+        {
+            var existing = ShopOfferGenerator.GenerateOffer(new Random(1));
+
+            var replacements = ShopOfferGenerator.GenerateReplacements(new Random(2), 2, existing);
+
+            Assert.AreEqual(replacements.Count, replacements.Distinct().Count());
+        }
     }
 }

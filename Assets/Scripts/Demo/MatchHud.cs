@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.InputSystem;
 using StarBound.Combat;
 using StarBound.Core;
@@ -10,6 +11,7 @@ using StarBound.Map;
 using StarBound.Movement;
 using StarBound.Multiplayer;
 using StarBound.Shop;
+using StarBound.UI;
 using Random = System.Random;
 
 namespace StarBound.Demo
@@ -29,25 +31,29 @@ namespace StarBound.Demo
         private Transform markersParent;
         private float hexRadius;
         private Random rng;
+        private MapConfirmationUI confirmationUI;
 
         private GameObject playerOneMarker;
         private GameObject playerTwoMarker;
 
         private RolledDie selectedDie;
+        private HexCoordinate? pendingTarget;
         private bool showShop;
         private IReadOnlyList<ItemDefinition> shopOffer = Array.Empty<ItemDefinition>();
         private bool showJobBoard;
         private IReadOnlyList<JobDefinition> jobOffer = Array.Empty<JobDefinition>();
+        private bool jobOfferRolledThisTurn;
         private string lastMessage;
         private readonly List<string> combatLog = new();
         private GUIStyle headerStyle;
 
-        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius)
+        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, MapConfirmationUI confirmationUI)
         {
             this.match = match;
             this.mapView = mapView;
             this.markersParent = markersParent;
             this.hexRadius = hexRadius;
+            this.confirmationUI = confirmationUI;
             rng = new Random();
 
             CreateShipMarkers();
@@ -63,6 +69,13 @@ namespace StarBound.Demo
             if (mouse == null || !mouse.leftButton.wasPressedThisFrame)
                 return;
 
+            // A click already consumed by UGUI (e.g. the Confirm/Cancel
+            // buttons) must not also be interpreted as a world hex click —
+            // Update polls Mouse.current directly, independent of the
+            // UGUI event pipeline that handled the button press.
+            if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+                return;
+
             var mouseScreenPosition = mouse.position.ReadValue();
             var mouseGuiPosition = new Vector2(mouseScreenPosition.x, Screen.height - mouseScreenPosition.y);
             if (HudRect.Contains(mouseGuiPosition))
@@ -76,17 +89,51 @@ namespace StarBound.Demo
             var worldPoint = camera.ScreenToWorldPoint(new Vector3(mouseScreenPosition.x, mouseScreenPosition.y, distanceFromCamera));
             var targetCoordinate = HexLayout.WorldToAxial(worldPoint, hexRadius);
 
-            var result = match.Move(selectedDie, targetCoordinate, rng);
+            // Illegal targets aren't selectable at all — no attempted
+            // move, no error message, just ignored.
+            if (!ComputeLegalTargets(selectedDie).Contains(targetCoordinate))
+                return;
+
+            // Tapping any other legal hex while one's already pending just
+            // switches the pending target — no need to Cancel first.
+            pendingTarget = targetCoordinate;
+            lastMessage = null;
+            RefreshView();
+            confirmationUI.Show(ConfirmPendingMove, CancelPendingMove);
+        }
+
+        private void ConfirmPendingMove()
+        {
+            if (pendingTarget == null)
+                return;
+
+            var result = match.Move(selectedDie, pendingTarget.Value, rng);
+            pendingTarget = null;
+            confirmationUI.Hide();
+
             if (result.Success)
             {
                 lastMessage = null;
                 selectedDie = null;
-                RefreshView();
             }
             else
             {
+                // Shouldn't normally happen since the target came from
+                // ComputeLegalTargets, but a Tradelane toll the player can
+                // no longer afford (say, after an intervening purchase)
+                // can still fail here — keep the die selected so they can
+                // pick a different target instead of losing their turn.
                 lastMessage = $"Can't move there ({result.FailureReason}).";
             }
+
+            RefreshView();
+        }
+
+        private void CancelPendingMove()
+        {
+            pendingTarget = null;
+            confirmationUI.Hide();
+            RefreshView();
         }
 
         private void OnGUI()
@@ -114,6 +161,8 @@ namespace StarBound.Demo
                 $"Medium: {match.CurrentPlayer.MediumEngagementWins}  " +
                 $"Hard: {match.CurrentPlayer.HardEngagementWins}/{Player.HardWinsToVictory}");
             GUILayout.Label($"Actions remaining: {match.ActionsRemaining}/{Match.ActionsPerTurn}");
+
+            DrawProgressionStatus();
 
             GUILayout.Space(10);
 
@@ -143,6 +192,8 @@ namespace StarBound.Demo
                     if (GUILayout.Button(label))
                     {
                         selectedDie = die == selectedDie ? null : die;
+                        pendingTarget = null;
+                        confirmationUI.Hide();
                         RefreshView();
                     }
                 }
@@ -164,8 +215,11 @@ namespace StarBound.Demo
             if (GUILayout.Button(showShop ? "Close Shop" : "Open Shop"))
             {
                 showShop = !showShop;
+                // The planet's shelf persists in Match/Hex now (see
+                // PlanetShopService) — fetching it fresh on every open just
+                // reads whatever's currently there, it doesn't reroll it.
                 if (showShop)
-                    shopOffer = ShopOfferGenerator.GenerateOffer(rng);
+                    shopOffer = match.GetShopOffer(rng);
             }
             GUI.enabled = true;
 
@@ -184,8 +238,13 @@ namespace StarBound.Demo
             if (GUILayout.Button(showJobBoard ? "Close Job Board" : "Open Job Board"))
             {
                 showJobBoard = !showJobBoard;
-                if (showJobBoard)
+                // Roll once per turn, not once per open — same reasoning as
+                // the Shop offer above.
+                if (showJobBoard && !jobOfferRolledThisTurn)
+                {
                     jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map);
+                    jobOfferRolledThisTurn = true;
+                }
             }
             GUI.enabled = true;
 
@@ -220,7 +279,11 @@ namespace StarBound.Demo
             {
                 match.EndTurn();
                 selectedDie = null;
+                pendingTarget = null;
+                confirmationUI.Hide();
                 showShop = false;
+                showJobBoard = false;
+                jobOfferRolledThisTurn = false;
                 lastMessage = null;
                 combatLog.Clear();
                 RefreshView();
@@ -230,6 +293,38 @@ namespace StarBound.Demo
             if (lastMessage != null)
                 GUILayout.Label(lastMessage);
         }
+
+        // Read-only status block for the progression mechanic (see
+        // MatchProgressionService) — current phase, the persisting
+        // variable in play (if any), and the current race-to-complete
+        // goal (if any). The goal's target hex is also highlighted on the
+        // map, same as an active job's destination — see RefreshView.
+        private void DrawProgressionStatus()
+        {
+            GUILayout.Label($"Phase: {match.MaxUnlockedTier} unlocked");
+
+            if (match.ActiveVariable != MatchVariable.None)
+                GUILayout.Label($"Event: {DescribeVariable(match.ActiveVariable)}");
+
+            if (match.ActiveGoal is { } goal)
+                GUILayout.Label($"Race goal: {DescribeGoal(goal)}");
+        }
+
+        private static string DescribeVariable(MatchVariable variable) => variable switch
+        {
+            MatchVariable.MinefieldDamage => "Minefield Damage — entering a Mines hex costs 1 Hull.",
+            MatchVariable.TradeBoom => "Trade Boom — Tradelane tolls are waived.",
+            _ => variable.ToString()
+        };
+
+        private static string DescribeGoal(MatchGoal goal) => goal.Type switch
+        {
+            MatchGoalType.TravelAndPay =>
+                $"Travel & Pay — reach ({goal.TargetHex.Q}, {goal.TargetHex.R}) with at least ${goal.MoneyRequired} (reward ${goal.RewardMoney}).",
+            MatchGoalType.DefeatNamedTarget =>
+                $"Defeat the marked target at ({goal.TargetHex.Q}, {goal.TargetHex.R}) (reward ${goal.RewardMoney}).",
+            _ => goal.Type.ToString()
+        };
 
         private void DrawShipStats(Ship ship)
         {
@@ -668,7 +763,10 @@ namespace StarBound.Demo
                 }
             }
 
-            mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes);
+            if (match.ActiveGoal is { } goal)
+                highlighted.Add(goal.TargetHex);
+
+            mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes, pendingTarget);
             UpdateShipMarkers();
         }
 

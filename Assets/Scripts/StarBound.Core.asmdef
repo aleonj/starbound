@@ -2,7 +2,8 @@
     "name": "StarBound.Core",
     "rootNamespace": "StarBound",
     "references": [
-        "Unity.InputSystem"
+        "Unity.InputSystem",
+        "UnityEngine.UI"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

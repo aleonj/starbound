@@ -33,16 +33,52 @@ namespace StarBound.Multiplayer
 
         private enum ActionSession { None, Move, Market }
 
+        // Successful (non-PvP) engagement wins accumulate toward the next
+        // progression event, which introduces a new ActiveVariable + ActiveGoal
+        // and — once that goal is completed by either player — raises
+        // MaxUnlockedTier. See MatchProgressionService and HandleArrival/
+        // ResolveActiveEngagement for where each piece is actually wired in.
+        private const int EngagementsPerProgressionEvent = 2;
+
         private DiceHand currentHand;
         private EngagementSession activeEngagement;
         private int actionsUsed;
         private ActionSession openSession = ActionSession.None;
+        private int successfulEngagementsSinceLastEvent;
 
         public GameMap Map { get; }
         public Player PlayerOne { get; }
         public Player PlayerTwo { get; }
         public Player CurrentPlayer { get; private set; }
         public Player Winner { get; private set; }
+
+        // Starts at 1, incremented on every EndTurn (either player's) —
+        // used by PlanetShopService to gate a purchased shop slot's
+        // refill to "not the same turn it was bought," regardless of
+        // which planet or which player is asking.
+        public int TurnNumber { get; private set; } = 1;
+
+        // Progression state — see the EngagementsPerProgressionEvent doc
+        // comment above. MaxUnlockedTier starts at Easy regardless of the
+        // match's overall Difficulty (a separate, map-generation-only
+        // concept): a Medium/Hard marker can already exist on the map from
+        // generation, but stays inert (see HandleArrival) until unlocked.
+        public EngagementTier MaxUnlockedTier { get; private set; } = EngagementTier.Easy;
+        public MatchVariable ActiveVariable { get; private set; } = MatchVariable.None;
+        public MatchGoal ActiveGoal { get; private set; }
+
+        // Directly advances the phase, skipping the usual "win an event's
+        // goal" path — same category of direct state setup as
+        // Player.RecordEngagementWin: a legitimate way to seed a match at
+        // a later phase (tooling, or a test that wants a Medium/Hard
+        // marker to trigger without first replaying the whole approach to
+        // it) without needing to fake a goal completion. Never moves the
+        // ceiling backward.
+        public void UnlockTier(EngagementTier tier)
+        {
+            if (tier > MaxUnlockedTier)
+                MaxUnlockedTier = tier;
+        }
 
         public Match(GameMap map, Player playerOne, Player playerTwo)
         {
@@ -170,7 +206,7 @@ namespace StarBound.Multiplayer
             if (!CanMove)
                 throw new InvalidOperationException("Movement has already ended for this turn.");
 
-            var result = ShipMover.TryMove(Map, die, CurrentPlayer, to);
+            var result = ShipMover.TryMove(Map, die, CurrentPlayer, to, waiveTradelaneToll: ActiveVariable == MatchVariable.TradeBoom);
             if (!result.Success)
                 return result;
 
@@ -206,14 +242,88 @@ namespace StarBound.Multiplayer
         // the map), then trigger combat if the hex is guarded.
         private void HandleArrival(HexCoordinate position, Random rng)
         {
-            if (Map.TryGetHex(position, out var hex) && hex.HasEngagement)
+            Map.TryGetHex(position, out var hex);
+
+            // A marker above the current phase stays fully hidden, not
+            // just non-triggering — discovering it here (and so revealing
+            // its marker icon) with no way to actually engage it would
+            // just be confusing. It becomes discoverable the moment its
+            // tier is within MaxUnlockedTier, same visit or a later one.
+            if (hex != null && hex.HasEngagement && hex.Engagement <= MaxUnlockedTier)
                 CurrentPlayer.DiscoverHex(position);
 
-            var session = EngagementTrigger.TryTrigger(CurrentPlayer, Map, rng);
+            // Minefield Damage variable — applied against the arrival hex
+            // itself, before any relocation a depleted Hull might cause
+            // (see IntegrityPenaltyService's documented "invoke after
+            // anything that can deplete Hull/Energy" contract).
+            if (hex != null && hex.Terrain == TerrainType.Mines && ActiveVariable == MatchVariable.MinefieldDamage)
+            {
+                CurrentPlayer.Ship.ApplyStatDelta(CoreStat.Hull, -1);
+                IntegrityPenaltyService.ApplyIfDepleted(CurrentPlayer, Map);
+            }
+
+            TryCompleteTravelAndPayGoal();
+
+            // No exemption needed here for a DefeatNamedTarget goal's own
+            // marker — it's placed at the player's current MaxUnlockedTier
+            // (see MatchProgressionService), so it's always already within
+            // the normal gating ceiling.
+            var session = EngagementTrigger.TryTrigger(CurrentPlayer, Map, rng, MaxUnlockedTier);
             if (session != null)
             {
                 activeEngagement = session;
                 ExhaustActions(); // an ambush spends the whole remaining budget
+            }
+        }
+
+        // First player to be standing on the goal's hex with enough money
+        // on hand claims it immediately on arrival — no separate "deliver"
+        // action, unlike jobs.
+        private void TryCompleteTravelAndPayGoal()
+        {
+            if (ActiveGoal is not { Type: MatchGoalType.TravelAndPay } goal)
+                return;
+            if (CurrentPlayer.Position != goal.TargetHex || CurrentPlayer.Ship.Money < goal.MoneyRequired)
+                return;
+
+            CurrentPlayer.Ship.TrySpendMoney(goal.MoneyRequired);
+            CompleteGoal(CurrentPlayer);
+        }
+
+        // Pays the reward, advances the progression phase, and clears the
+        // goal — ActiveVariable deliberately stays as-is, since it persists
+        // until the *next* event replaces it, not until the goal is claimed.
+        private void CompleteGoal(Player awardee)
+        {
+            awardee.Ship.AddMoney(ActiveGoal.RewardMoney);
+            MaxUnlockedTier = NextUnlockTier();
+            ActiveGoal = null;
+        }
+
+        private EngagementTier NextUnlockTier() => (EngagementTier)((int)MaxUnlockedTier + 1);
+
+        // Called only for a real (non-PvP) engagement win — see
+        // ResolveActiveEngagement. Two independent things can happen on
+        // the same win: it might be the one that finally defeats the
+        // active DefeatNamedTarget goal, and/or it might be the one that
+        // crosses the threshold for a brand new event to fire (only once
+        // no goal is currently active and there's still a tier left to
+        // unlock).
+        private void HandleProgressionOnEngagementWin(HexCoordinate resolvedHex, Random rng)
+        {
+            successfulEngagementsSinceLastEvent++;
+
+            if (ActiveGoal is { Type: MatchGoalType.DefeatNamedTarget } goal && resolvedHex == goal.TargetHex)
+                CompleteGoal(CurrentPlayer);
+
+            if (ActiveGoal == null && MaxUnlockedTier < EngagementTier.Hard &&
+                successfulEngagementsSinceLastEvent >= EngagementsPerProgressionEvent)
+            {
+                var (variable, newGoal) = MatchProgressionService.FireEvent(
+                    Map, PlayerOne.Position, PlayerTwo.Position, MaxUnlockedTier, rng);
+                ActiveVariable = variable;
+                ActiveGoal = newGoal;
+                successfulEngagementsSinceLastEvent = 0;
             }
         }
 
@@ -296,8 +406,33 @@ namespace StarBound.Multiplayer
 
             var result = ShopService.TryPurchase(CurrentPlayer.Ship, item);
             if (result.Success)
+            {
                 ConsumeActionForSession(ActionSession.Market);
+
+                // The Wormhole Device is a standing purchase outside the
+                // random pool/offer (see ItemPool), so it never touches a
+                // planet's persistent shelf.
+                if (item != ItemPool.WormholeDevice &&
+                    Map.TryGetHex(CurrentPlayer.Position, out var hex) &&
+                    hex.Terrain == TerrainType.PlanetOrStarport)
+                {
+                    PlanetShopService.RecordPurchase(hex, item, TurnNumber);
+                }
+            }
             return result;
+        }
+
+        // Single source of truth for a planet's shop shelf — see
+        // PlanetShopService. The HUD calls this instead of rolling its
+        // own offer, so purchases and refill timing stay consistent
+        // regardless of who's asking or how many times the panel is
+        // opened and closed.
+        public IReadOnlyList<ItemDefinition> GetShopOffer(Random rng)
+        {
+            if (!Map.TryGetHex(CurrentPlayer.Position, out var hex) || hex.Terrain != TerrainType.PlanetOrStarport)
+                throw new InvalidOperationException("Not standing on a planet.");
+
+            return PlanetShopService.GetOffer(hex, TurnNumber, rng);
         }
 
         public SellResult SellItem(ItemDefinition item)
@@ -368,7 +503,10 @@ namespace StarBound.Multiplayer
             // marker (and whatever's guarding it) stays for a future
             // encounter, by either player.
             if (!wasPvP && activeEngagement.Outcome == EngagementOutcome.PlayerWon)
+            {
                 EngagementTrigger.ClearMarker(Map, CurrentPlayer.Position);
+                HandleProgressionOnEngagementWin(resolvedHex, rng);
+            }
 
             if (activeEngagement.Outcome == EngagementOutcome.PlayerLost)
             {
@@ -408,6 +546,7 @@ namespace StarBound.Multiplayer
             actionsUsed = 0;
             openSession = ActionSession.None;
             CurrentPlayer = CurrentPlayer == PlayerOne ? PlayerTwo : PlayerOne;
+            TurnNumber++;
         }
 
         // Picks a random neighboring hex with no engagement marker of its

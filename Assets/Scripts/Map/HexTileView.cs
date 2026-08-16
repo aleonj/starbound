@@ -11,7 +11,7 @@ namespace StarBound.Map
         private static readonly Dictionary<float, Mesh> MarkerMeshCache = new();
         private static readonly Dictionary<float, Mesh> HighlightMeshCache = new();
 
-        public void Initialize(TerrainType terrain, EngagementTier tier, float hexRadius, bool isHighlighted = false)
+        public void Initialize(TerrainType terrain, EngagementTier tier, float hexRadius, HexHighlightState highlightState = HexHighlightState.None)
         {
             var meshFilter = GetComponent<MeshFilter>();
             meshFilter.sharedMesh = GetOrCreate(HexMeshCache, hexRadius * 0.95f);
@@ -20,7 +20,7 @@ namespace StarBound.Map
             meshRenderer.sharedMaterial = TerrainMaterials.Get(terrain);
             meshRenderer.sortingOrder = 0;
 
-            if (isHighlighted)
+            if (highlightState != HexHighlightState.None)
             {
                 // Larger and drawn behind the tile, so only its edge shows —
                 // reads as a glowing border rather than obscuring the tile.
@@ -29,7 +29,9 @@ namespace StarBound.Map
                 highlight.GetComponent<MeshFilter>().sharedMesh = GetOrCreate(HighlightMeshCache, hexRadius * 1.15f);
 
                 var highlightRenderer = highlight.GetComponent<MeshRenderer>();
-                highlightRenderer.sharedMaterial = HighlightMaterials.TargetHighlight;
+                highlightRenderer.sharedMaterial = highlightState == HexHighlightState.Pending
+                    ? HighlightMaterials.PendingHighlight
+                    : HighlightMaterials.TargetHighlight;
                 highlightRenderer.sortingOrder = -1;
             }
 

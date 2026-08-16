@@ -139,6 +139,20 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void TryMove_OntoTradelane_WithTollWaived_SucceedsWithoutChargingMoney()
+        {
+            var map = BuildMapWithTollAndWormholeHexes();
+            var die = new RolledDie(0, TerrainType.Tradelane);
+            var player = BuildPlayer(new HexCoordinate(0, 0), money: 0);
+
+            var result = ShipMover.TryMove(map, die, player, to: new HexCoordinate(1, 0), waiveTradelaneToll: true);
+
+            Assert.IsTrue(result.Success);
+            Assert.IsTrue(die.IsSpent);
+            Assert.AreEqual(0, player.Ship.Money);
+        }
+
+        [Test]
         public void TryMove_OntoWormhole_WithoutDevice_Fails()
         {
             var map = BuildMapWithTollAndWormholeHexes();

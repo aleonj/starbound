@@ -3,6 +3,7 @@ using System.Linq;
 using NUnit.Framework;
 using StarBound.Combat;
 using StarBound.Core;
+using StarBound.Map;
 using StarBound.Movement;
 using StarBound.Multiplayer;
 using StarBound.Shop;
@@ -190,6 +191,7 @@ namespace StarBound.Tests
             p1.RecordEngagementWin(EngagementTier.Hard);
             p1.RecordEngagementWin(EngagementTier.Hard);
             match.Map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Hard });
+            match.UnlockTier(EngagementTier.Hard); // this test is about the win-counting/victory rule, not progression phasing
 
             match.RollDice(new Random(1));
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
@@ -1157,6 +1159,273 @@ namespace StarBound.Tests
             match.UseItem(consumable);
 
             Assert.AreEqual(3, p1.Ship.GetStat(CoreStat.Hull));
+        }
+
+        // --- Progression (MatchProgressionService) ---
+
+        // Two Easy markers, both reachable from one another and from
+        // (1,-1) — see the neighbor math worked out for this layout —
+        // plus a Mines and a Tradelane hex for exercising each of the two
+        // starter variables once an event has fired.
+        private static (Match match, Player p1, Player p2) BuildProgressionMatch()
+        {
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace));
+            map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            map.SetHex(new Hex(new HexCoordinate(1, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.Mines));
+            map.SetHex(new Hex(new HexCoordinate(1, -2), TerrainType.Tradelane));
+
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+
+            return (new Match(map, p1, p2), p1, p2);
+        }
+
+        // Grinds out a guaranteed win against whatever NPC is currently
+        // active — same stat-boost technique as ResolveActiveEngagement_PlayerWins_RecordsWinAndClearsMarker.
+        private static void ForceWin(Match match)
+        {
+            var rng = new Random(1);
+            var rounds = 0;
+            while (match.ActiveEngagement.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                match.ActiveEngagement.ResolveInitiative(rng);
+                match.ActiveEngagement.ResolveAttack(rng);
+                rounds++;
+            }
+        }
+
+        // Wins the two pre-placed Easy engagements back to back — crossing
+        // EngagementsPerProgressionEvent's threshold on the second win, so
+        // whatever event fires is decided by resolutionSeed (the only rng
+        // MatchProgressionService.FireEvent actually consumes here, since
+        // the first win doesn't cross the threshold). Leaves p1 as
+        // CurrentPlayer with a fresh, unspent action budget, sitting at
+        // (1,-1).
+        private static void WinTwoEasyEngagementsAndFireAnEvent(Match match, Player p1, int resolutionSeed)
+        {
+            p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20);
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+            ForceWin(match);
+            match.ResolveActiveEngagement(new Random(1));
+
+            match.EndTurn(); // p2's turn
+            match.EndTurn(); // back to p1, fresh actions
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, -1), new Random(1));
+            ForceWin(match);
+            match.ResolveActiveEngagement(new Random(resolutionSeed));
+
+            match.EndTurn();
+            match.EndTurn();
+        }
+
+        // MatchProgressionService's variable/goal-type picks are flat
+        // coin flips, not a stat contest — there's no boost to force a
+        // specific outcome the way ForceWin does for combat, so this
+        // searches for a resolution seed that lands on the desired
+        // variable instead. ~100 tries makes a false failure astronomically
+        // unlikely for a 1-in-2 draw.
+        private static (Match match, Player p1, Player p2) BuildMatchWithVariable(MatchVariable desired)
+        {
+            for (var seed = 1; seed <= 100; seed++)
+            {
+                var (match, p1, p2) = BuildProgressionMatch();
+                WinTwoEasyEngagementsAndFireAnEvent(match, p1, seed);
+                if (match.ActiveVariable == desired)
+                    return (match, p1, p2);
+            }
+
+            Assert.Fail($"Never rolled {desired} in 100 attempts — check MatchProgressionService's variable table.");
+            return default;
+        }
+
+        private static (Match match, Player p1, Player p2) BuildMatchWithGoalType(MatchGoalType desired)
+        {
+            for (var seed = 1; seed <= 100; seed++)
+            {
+                var (match, p1, p2) = BuildProgressionMatch();
+                WinTwoEasyEngagementsAndFireAnEvent(match, p1, seed);
+                if (match.ActiveGoal.Type == desired)
+                    return (match, p1, p2);
+            }
+
+            Assert.Fail($"Never rolled {desired} in 100 attempts — check MatchProgressionService's goal-type draw.");
+            return default;
+        }
+
+        [Test]
+        public void Move_OntoMarkerAboveMaxUnlockedTier_DoesNotTriggerAndMarkerStays()
+        {
+            var (match, p1, _) = BuildMatch(); // MaxUnlockedTier starts at Easy
+            match.Map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Medium });
+            match.RollDice(new Random(1));
+
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
+
+            Assert.IsFalse(match.IsInEngagement, "A Medium marker shouldn't trigger while only Easy is unlocked.");
+            Assert.IsTrue(match.Map.TryGetHex(new HexCoordinate(0, -1), out var hex));
+            Assert.IsTrue(hex.HasEngagement, "The marker should stay in place for once Medium unlocks.");
+            CollectionAssert.DoesNotContain(p1.DiscoveredEngagementHexes.ToList(), new HexCoordinate(0, -1),
+                "A locked-tier marker should stay fully hidden, not just non-triggering.");
+        }
+
+        [Test]
+        public void ProgressionEvent_FiresAfterTwoSuccessfulEngagements()
+        {
+            var (match, p1, _) = BuildProgressionMatch();
+
+            WinTwoEasyEngagementsAndFireAnEvent(match, p1, resolutionSeed: 1);
+
+            Assert.AreNotEqual(MatchVariable.None, match.ActiveVariable);
+            Assert.IsNotNull(match.ActiveGoal);
+            Assert.AreEqual(EngagementTier.Easy, match.MaxUnlockedTier, "Firing the event alone shouldn't advance the phase — only completing its goal does.");
+        }
+
+        [Test]
+        public void MinefieldDamageVariable_EnteringAMinesHex_DealsOneHullDamage()
+        {
+            var (match, p1, _) = BuildMatchWithVariable(MatchVariable.MinefieldDamage);
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(1));
+
+            Assert.AreEqual(Ship.DefaultStatValue - 1, p1.Ship.GetStat(CoreStat.Hull));
+        }
+
+        [Test]
+        public void TradeBoomVariable_EnteringATradelaneHex_WaivesTheToll()
+        {
+            var (match, p1, _) = BuildMatchWithVariable(MatchVariable.TradeBoom);
+            Assert.AreEqual(0, p1.Ship.Money); // no starting money — an unwaived toll would block this move outright
+
+            match.RollDice(new Random(1));
+            var result = match.Move(new RolledDie(0, TerrainType.Tradelane), new HexCoordinate(1, -2), new Random(1));
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(0, p1.Ship.Money);
+        }
+
+        [Test]
+        public void TravelAndPayGoal_CompletingIt_AwardsRewardAdvancesPhaseAndKeepsTheVariable()
+        {
+            var (match, p1, _) = BuildMatchWithGoalType(MatchGoalType.TravelAndPay);
+            var goal = match.ActiveGoal;
+            var variableBeforeCompletion = match.ActiveVariable;
+
+            var approach = HexMath.Neighbors(goal.TargetHex).First(n => match.Map.TryGetHex(n, out _));
+            match.Map.TryGetHex(goal.TargetHex, out var targetHex);
+            p1.Position = approach;
+            // A bit more than MoneyRequired: if the target happens to be
+            // the Tradelane hex and TradeBoom isn't the active variable,
+            // the toll gets deducted by ShipMover before the goal's own
+            // money check runs — this buffer keeps the test robust to
+            // that combination rather than asserting an exact amount.
+            p1.Ship.AddMoney(goal.MoneyRequired + 10);
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, targetHex.Terrain), goal.TargetHex, new Random(1));
+
+            Assert.IsNull(match.ActiveGoal);
+            Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier);
+            Assert.GreaterOrEqual(p1.Ship.Money, goal.RewardMoney);
+            Assert.AreEqual(variableBeforeCompletion, match.ActiveVariable, "The variable persists until the *next* event, not until the goal is claimed.");
+        }
+
+        [Test]
+        public void DefeatNamedTargetGoal_CompletingIt_AwardsRewardAndAdvancesPhase()
+        {
+            var (match, p1, _) = BuildMatchWithGoalType(MatchGoalType.DefeatNamedTarget);
+            var goal = match.ActiveGoal;
+            Assert.AreEqual(EngagementTier.Easy, match.MaxUnlockedTier);
+            match.Map.TryGetHex(goal.TargetHex, out var targetHex);
+            Assert.AreEqual(EngagementTier.Easy, targetHex.Engagement, "The goal's own marker is placed at the player's CURRENT tier — a winnable fight, not a preview of the next one.");
+            p1.Ship.AddMoney(10); // covers a possible Tradelane toll on the approach — see the TravelAndPay test for why
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, targetHex.Terrain), goal.TargetHex, new Random(1));
+            Assert.IsTrue(match.IsInEngagement, "The goal's own marker triggers via ordinary gating — it's never above MaxUnlockedTier.");
+
+            ForceWin(match);
+            match.ResolveActiveEngagement(new Random(1));
+
+            Assert.IsNull(match.ActiveGoal);
+            Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier);
+            Assert.GreaterOrEqual(p1.Ship.Money, goal.RewardMoney);
+        }
+
+        // --- Persistent per-planet shop (PlanetShopService) ---
+
+        private static (Match match, Player p1, Player p2) BuildPlanetShopMatch()
+        {
+            var map = new GameMap(radius: 2, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace));
+
+            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3, startingMoney: 1000)) { Position = new HexCoordinate(0, 0) };
+            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3, startingMoney: 1000)) { Position = new HexCoordinate(0, 0) };
+
+            return (new Match(map, p1, p2), p1, p2);
+        }
+
+        [Test]
+        public void GetShopOffer_NotOnAPlanet_Throws()
+        {
+            var (match, p1, _) = BuildPlanetShopMatch();
+            p1.Position = new HexCoordinate(1, 0);
+
+            Assert.Throws<InvalidOperationException>(() => match.GetShopOffer(new Random(1)));
+        }
+
+        [Test]
+        public void BuyItem_OnAPlanet_RemovesItemFromTheShelfImmediately()
+        {
+            var (match, p1, _) = BuildPlanetShopMatch();
+            var offer = match.GetShopOffer(new Random(1));
+            var bought = offer[0];
+
+            var result = match.BuyItem(bought);
+
+            Assert.IsTrue(result.Success);
+            var afterPurchase = match.GetShopOffer(new Random(2));
+            Assert.AreEqual(ShopOfferGenerator.OfferSize - 1, afterPurchase.Count);
+            CollectionAssert.DoesNotContain(afterPurchase.ToList(), bought);
+        }
+
+        [Test]
+        public void BuyItem_ThenSameTurn_ShelfStaysShortUntilEndTurn()
+        {
+            var (match, p1, p2) = BuildPlanetShopMatch();
+            var offer = match.GetShopOffer(new Random(1));
+            match.BuyItem(offer[0]);
+
+            // Still the same turn — no fresh action to spend, but the
+            // shelf query itself doesn't cost one either.
+            var stillShort = match.GetShopOffer(new Random(2));
+            Assert.AreEqual(ShopOfferGenerator.OfferSize - 1, stillShort.Count);
+
+            match.EndTurn(); // p2's turn — same shared shelf
+            var refilled = match.GetShopOffer(new Random(3));
+            Assert.AreEqual(ShopOfferGenerator.OfferSize, refilled.Count);
+        }
+
+        [Test]
+        public void BuyItem_WormholeDevice_DoesNotDisturbThePersistentShelf()
+        {
+            var (match, p1, _) = BuildPlanetShopMatch();
+            var offer = match.GetShopOffer(new Random(1)).ToList();
+
+            var result = match.BuyItem(ItemPool.WormholeDevice);
+
+            Assert.IsTrue(result.Success);
+            var afterPurchase = match.GetShopOffer(new Random(2)).ToList();
+            CollectionAssert.AreEqual(offer, afterPurchase);
         }
     }
 }

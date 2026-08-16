@@ -36,10 +36,14 @@ namespace StarBound.Tests
     }
 
     // Plays one full match start-to-finish using only production Match
-    // API calls, choosing uniformly at random among whatever's currently
-    // legal. This explores far more state combinations than anyone would
-    // hand-write — the same idea as a fuzzer, applied to this turn-based
-    // rules engine specifically.
+    // API calls, choosing (mostly) at random among whatever's currently
+    // legal — weighted toward survival (see BuildLegalActions' repair/buy
+    // weighting) and, since game-progression landed, toward finishing
+    // whatever the active goal is (see GoalPursuitWeight), since without
+    // that bias Medium/Hard never unlock and no match can complete within
+    // the turn cap. Still explores far more state combinations than
+    // anyone would hand-write — the same idea as a fuzzer, applied to
+    // this turn-based rules engine specifically.
     public static class RandomMatchBot
     {
         // Safety net against a pathological "always something free to do"
@@ -58,6 +62,15 @@ namespace StarBound.Tests
         // crowding out real progress. Down-weighted so it still happens,
         // just not constantly.
         private const double AttackOpponentChance = 0.1;
+
+        // A move that shortens the distance to the active progression
+        // goal's target hex gets this many extra copies in the action
+        // pool (see BuildLegalActions) — without it, the bot has no
+        // reason to ever actually finish a goal, so Medium/Hard never
+        // unlock and the match can't be won within the turn cap. Not
+        // pathfinding — it only prefers a closer neighbor when one of the
+        // dice already rolled happens to offer one.
+        private const int GoalPursuitWeight = 5;
 
         public static MatchSimulationResult PlayFullMatch(int seed, MapSize mapSize, Difficulty difficulty, int turnCap)
         {
@@ -140,11 +153,25 @@ namespace StarBound.Tests
             var player = match.CurrentPlayer;
             var ship = player.Ship;
 
+            var goal = match.ActiveGoal;
+
             if (match.CanMove)
             {
                 foreach (var die in match.CurrentHand.UnspentDice)
                 foreach (var target in ComputeLegalTargets(match, die))
+                {
                     actions.Add(() => match.Move(die, target, rng));
+
+                    // See GoalPursuitWeight — prefer whichever legal move
+                    // actually closes distance to the goal's target hex,
+                    // for either goal type (both carry a TargetHex).
+                    if (goal != null &&
+                        HexMath.Distance(target, goal.TargetHex) < HexMath.Distance(player.Position, goal.TargetHex))
+                    {
+                        for (var i = 0; i < GoalPursuitWeight; i++)
+                            actions.Add(() => match.Move(die, target, rng));
+                    }
+                }
             }
 
             if (match.CanShop)
@@ -162,10 +189,20 @@ namespace StarBound.Tests
                     actions.Add(() => match.RepairStat(CoreStat.Energy));
                 }
 
+                // Reserve whatever a TravelAndPay goal still needs so
+                // shopping doesn't spend the bot back below the amount
+                // required to ever complete it.
+                var moneyToPreserve = goal is { Type: MatchGoalType.TravelAndPay } ? goal.MoneyRequired : 0;
+
                 var buyWeight = ship.Money >= 100 && ship.CanHoldAnotherItem ? 4 : 1;
                 foreach (var item in ShopOfferGenerator.GenerateOffer(rng))
+                {
+                    if (ship.Money - item.Price < moneyToPreserve)
+                        continue;
+
                     for (var i = 0; i < buyWeight; i++)
                         actions.Add(() => match.BuyItem(item));
+                }
 
                 foreach (var held in ship.HeldItems.ToList())
                     actions.Add(() => match.SellItem(held));

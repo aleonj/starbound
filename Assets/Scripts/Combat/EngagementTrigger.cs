@@ -10,9 +10,18 @@ namespace StarBound.Combat
     // an EngagementSession round by round can only know after the fact.
     public static class EngagementTrigger
     {
-        public static EngagementSession TryTrigger(Player player, GameMap map, Random rng)
+        // maxTier gates progression phasing (see Match.MaxUnlockedTier): a
+        // marker whose tier exceeds it doesn't go off yet and stays on the
+        // map for a later visit, once that tier unlocks. Callers that need
+        // to bypass the gate for a specific hex (the active progression
+        // goal's own target) resolve that before calling in, by passing a
+        // maxTier that already covers it — this method stays a dumb
+        // ceiling check.
+        public static EngagementSession TryTrigger(Player player, GameMap map, Random rng, EngagementTier maxTier)
         {
             if (!map.TryGetHex(player.Position, out var hex) || !hex.HasEngagement)
+                return null;
+            if (hex.Engagement > maxTier)
                 return null;
 
             var definition = EngagementDefinitionTable.For(hex.Engagement);
