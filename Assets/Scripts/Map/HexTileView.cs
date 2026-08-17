@@ -9,7 +9,6 @@ namespace StarBound.Map
     {
         private static readonly Dictionary<float, Mesh> HexMeshCache = new();
         private static readonly Dictionary<float, Mesh> MarkerMeshCache = new();
-        private static readonly Dictionary<float, Mesh> HighlightMeshCache = new();
 
         private MeshRenderer highlightRenderer;
         private MeshRenderer markerRenderer;
@@ -32,13 +31,20 @@ namespace StarBound.Map
             meshRenderer.sharedMaterial = TerrainMaterials.Get(terrain);
             meshRenderer.sortingOrder = 0;
 
-            // Larger and drawn behind the tile, so only its edge shows —
-            // reads as a glowing border rather than obscuring the tile.
+            // Drawn on top of everything (see HexHighlight.shader) — its
+            // own alpha fades to fully transparent toward the center, so
+            // it reads as a glowing border without needing to rely on a
+            // smaller opaque tile occluding a larger one underneath. Uses
+            // the SAME mesh size as the tile itself (not oversized) so
+            // the shader's local coordinate space lines up exactly with
+            // the true hex edge — an oversized mesh here would put local
+            // radius 1.0 outside the actual hex, letting the ring spill
+            // into the neighboring tile.
             var highlight = new GameObject("Highlight", typeof(MeshFilter), typeof(MeshRenderer));
             highlight.transform.SetParent(transform, false);
-            highlight.GetComponent<MeshFilter>().sharedMesh = GetOrCreate(HighlightMeshCache, hexRadius * 1.15f);
+            highlight.GetComponent<MeshFilter>().sharedMesh = GetOrCreate(HexMeshCache, hexRadius * 0.95f);
             highlightRenderer = highlight.GetComponent<MeshRenderer>();
-            highlightRenderer.sortingOrder = -1;
+            highlightRenderer.sortingOrder = 3;
             highlight.SetActive(false);
 
             var marker = new GameObject("EngagementMarker", typeof(MeshFilter), typeof(MeshRenderer));

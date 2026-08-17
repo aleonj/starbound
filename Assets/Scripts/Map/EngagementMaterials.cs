@@ -4,7 +4,8 @@ using StarBound.Core;
 
 namespace StarBound.Map
 {
-    // Color-coded placeholder materials per engagement tier (easy/medium/hard).
+    // Tier-colored EngagementBeacon materials (easy/medium/hard) — see
+    // Assets/Shaders/EngagementBeacon.shader.
     public static class EngagementMaterials
     {
         private static readonly Dictionary<EngagementTier, Color> Colors = new()
@@ -29,10 +30,9 @@ namespace StarBound.Map
             return material;
         }
 
-        private static Material CreateMaterial(Color color) => new(Shader.Find("Sprites/Default"))
+        private static Material CreateMaterial(Color color) => new(Shader.Find("StarBound/EngagementBeacon"))
         {
-            color = color,
-            mainTexture = Texture2D.whiteTexture
+            color = color
         };
     }
 }

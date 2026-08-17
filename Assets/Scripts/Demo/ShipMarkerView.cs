@@ -8,14 +8,14 @@ namespace StarBound.Demo
     public class ShipMarkerView : MonoBehaviour
     {
         private static readonly Dictionary<float, Mesh> MeshCache = new();
-        private static readonly Dictionary<Color, Material> MaterialCache = new();
+        private static readonly Dictionary<(Color Color, int HullStyle), Material> MaterialCache = new();
 
-        public void Initialize(float radius, Color color)
+        public void Initialize(float radius, Color color, int hullStyle)
         {
             GetComponent<MeshFilter>().sharedMesh = GetOrCreateMesh(radius);
 
             var meshRenderer = GetComponent<MeshRenderer>();
-            meshRenderer.sharedMaterial = GetOrCreateMaterial(color);
+            meshRenderer.sharedMaterial = GetOrCreateMaterial(color, hullStyle);
             meshRenderer.sortingOrder = 2; // above terrain (0) and engagement markers (1)
         }
 
@@ -36,12 +36,14 @@ namespace StarBound.Demo
             return mesh;
         }
 
-        private static Material GetOrCreateMaterial(Color color)
+        private static Material GetOrCreateMaterial(Color color, int hullStyle)
         {
-            if (!MaterialCache.TryGetValue(color, out var material) || material == null)
+            var key = (color, hullStyle);
+            if (!MaterialCache.TryGetValue(key, out var material) || material == null)
             {
-                material = new Material(Shader.Find("Sprites/Default")) { color = color, mainTexture = Texture2D.whiteTexture };
-                MaterialCache[color] = material;
+                material = new Material(Shader.Find("StarBound/ShipCraft")) { color = color };
+                material.SetFloat("_HullStyle", hullStyle);
+                MaterialCache[key] = material;
             }
 
             return material;

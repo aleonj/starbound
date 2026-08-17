@@ -767,11 +767,11 @@ namespace StarBound.Demo
         {
             playerOneMarker = new GameObject("Player One Ship", typeof(ShipMarkerView));
             playerOneMarker.transform.SetParent(markersParent, false);
-            playerOneMarker.GetComponent<ShipMarkerView>().Initialize(hexRadius * 0.3f, PlayerOneColor);
+            playerOneMarker.GetComponent<ShipMarkerView>().Initialize(hexRadius * 0.3f, PlayerOneColor, hullStyle: 0);
 
             playerTwoMarker = new GameObject("Player Two Ship", typeof(ShipMarkerView));
             playerTwoMarker.transform.SetParent(markersParent, false);
-            playerTwoMarker.GetComponent<ShipMarkerView>().Initialize(hexRadius * 0.3f, PlayerTwoColor);
+            playerTwoMarker.GetComponent<ShipMarkerView>().Initialize(hexRadius * 0.3f, PlayerTwoColor, hullStyle: 1);
         }
 
         private void UpdateShipMarkers()

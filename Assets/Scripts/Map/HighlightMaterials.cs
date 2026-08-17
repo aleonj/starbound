@@ -19,10 +19,9 @@ namespace StarBound.Map
         public static Material PendingHighlight =>
             pendingHighlight = pendingHighlight != null ? pendingHighlight : CreateMaterial(new Color(0.3f, 0.9f, 1f));
 
-        private static Material CreateMaterial(Color color) => new(Shader.Find("Sprites/Default"))
+        private static Material CreateMaterial(Color color) => new(Shader.Find("StarBound/HexHighlight"))
         {
-            color = color,
-            mainTexture = Texture2D.whiteTexture
+            color = color
         };
     }
 }

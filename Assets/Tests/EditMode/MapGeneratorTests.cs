@@ -139,6 +139,30 @@ namespace StarBound.Tests
             }
         }
 
+        [TestCase(3)]
+        [TestCase(11)]
+        [TestCase(27)]
+        public void Generate_NoTwoPlanetsAreEverNeighbors(int seed)
+        {
+            // Radius 8 + Easy reliably produces several planets (see
+            // Generate_WithMultiplePlanets_BuildsAtLeastOneTradelaneRoute)
+            // — a good stress case for this constraint.
+            var map = MapGenerator.Generate(radius: 8, Difficulty.Easy, seed);
+
+            var planets = map.Hexes.Where(h => h.Terrain == TerrainType.PlanetOrStarport)
+                .Select(h => h.Coordinate).ToList();
+
+            for (var i = 0; i < planets.Count; i++)
+            {
+                for (var j = i + 1; j < planets.Count; j++)
+                {
+                    var distance = HexMath.Distance(planets[i], planets[j]);
+                    Assert.GreaterOrEqual(distance, 2,
+                        $"Planets at {planets[i]} and {planets[j]} are neighbors ({distance} apart).");
+                }
+            }
+        }
+
         [TestCase(0)]
         [TestCase(5)]
         [TestCase(19)]

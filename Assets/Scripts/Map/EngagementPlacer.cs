@@ -11,9 +11,9 @@ namespace StarBound.Map
     {
         private static readonly Dictionary<Difficulty, float> DensityByDifficulty = new()
         {
-            { Difficulty.Easy, 0.05f },
-            { Difficulty.Medium, 0.08f },
-            { Difficulty.Hard, 0.12f },
+            { Difficulty.Easy, 0.15f },
+            { Difficulty.Medium, 0.22f },
+            { Difficulty.Hard, 0.30f },
         };
 
         private static readonly Dictionary<Difficulty, (float easy, float medium, float hard)> TierWeights = new()

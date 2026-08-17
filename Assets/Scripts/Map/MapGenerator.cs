@@ -33,7 +33,10 @@ namespace StarBound.Map
             PlaceClusters(map, rng, TerrainType.Debris, Budget(totalHexes, distribution.Debris));
 
             // Planets are placed before tradelanes so routes have targets.
-            var planets = PlaceSingles(map, rng, TerrainType.PlanetOrStarport, Budget(totalHexes, distribution.PlanetOrStarport));
+            // minDistance: 2 keeps planets from ever landing as neighbors
+            // of each other (distance 1) — same hard-rule pattern as
+            // PlaceWormholePairs below, not a best-effort fallback.
+            var planets = PlaceSingles(map, rng, TerrainType.PlanetOrStarport, Budget(totalHexes, distribution.PlanetOrStarport), minDistance: 2);
             PlaceWormholePairs(map, rng, Budget(totalHexes, distribution.Wormhole));
 
             ConnectPlanetsWithTradelanes(map, planets, rng, Budget(totalHexes, distribution.Tradelane));
@@ -204,13 +207,22 @@ namespace StarBound.Map
             return current.Equals(to) ? path : new List<HexCoordinate>();
         }
 
-        private static List<HexCoordinate> PlaceSingles(GameMap map, Random rng, TerrainType terrain, int budget)
+        // minDistance <= 1 (the default) means "no constraint" — any
+        // ClearSpace hex is fair game, same as before this was
+        // parameterized. minDistance >= 2 enforces that every placed hex
+        // stays that far from every OTHER hex placed in this same call,
+        // as a hard rule: if no valid spot exists, placement just stops
+        // rather than violating it (see PlaceWormholePairs for the same
+        // reasoning applied to wormhole pairs).
+        private static List<HexCoordinate> PlaceSingles(GameMap map, Random rng, TerrainType terrain, int budget, int minDistance = 1)
         {
             var placed = new List<HexCoordinate>();
 
             for (var i = 0; i < budget; i++)
             {
-                var coordinate = PickRandomClearSpace(map, rng);
+                var coordinate = placed.Count == 0 || minDistance <= 1
+                    ? PickRandomClearSpace(map, rng)
+                    : PickFarClearSpace(map, rng, placed, minDistance);
                 if (coordinate == null)
                     break;
 
