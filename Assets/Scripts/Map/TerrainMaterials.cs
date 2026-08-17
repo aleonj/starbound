@@ -26,6 +26,11 @@ namespace StarBound.Map
         private static readonly Dictionary<TerrainType, string> ShaderNames = new()
         {
             { TerrainType.Asteroids, "StarBound/AsteroidFlow" },
+            { TerrainType.PlanetOrStarport, "StarBound/PlanetSpin" },
+            { TerrainType.Wormhole, "StarBound/WormholeSwirl" },
+            { TerrainType.Tradelane, "StarBound/TradelaneConnector" },
+            { TerrainType.Mines, "StarBound/MinesHazard" },
+            { TerrainType.Debris, "StarBound/DebrisField" },
         };
 
         private const string DefaultShaderName = "StarBound/GlassHex";

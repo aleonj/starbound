@@ -14,6 +14,8 @@ namespace StarBound.Map
         private const int MaxClusterSize = 4;
         private const int MaxPlacementAttempts = 200;
         private const int MaxPathSteps = 200;
+        private const int MinWormholeDistance = 8;
+        private const int MinTradelaneRouteLength = 3;
 
         public static GameMap Generate(int radius, Difficulty difficulty, int seed)
         {
@@ -32,7 +34,7 @@ namespace StarBound.Map
 
             // Planets are placed before tradelanes so routes have targets.
             var planets = PlaceSingles(map, rng, TerrainType.PlanetOrStarport, Budget(totalHexes, distribution.PlanetOrStarport));
-            PlaceSingles(map, rng, TerrainType.Wormhole, Budget(totalHexes, distribution.Wormhole));
+            PlaceWormholePairs(map, rng, Budget(totalHexes, distribution.Wormhole));
 
             ConnectPlanetsWithTradelanes(map, planets, rng, Budget(totalHexes, distribution.Tradelane));
 
@@ -128,12 +130,19 @@ namespace StarBound.Map
                 var (from, to) = FindNearestPair(connected, unconnected);
                 var path = BuildPathTowards(map, from, to, rng, remaining);
 
-                foreach (var coordinate in path)
+                // A 1-2 hex "route" doesn't read as a lane — skip painting
+                // it (the planets stay graph-connected for the walk below
+                // regardless, same as when a route fails to reach its
+                // target at all).
+                if (path.Count >= MinTradelaneRouteLength)
                 {
-                    if (map.TryGetHex(coordinate, out var hex) && hex.Terrain == TerrainType.ClearSpace)
-                        hex.Terrain = TerrainType.Tradelane;
+                    foreach (var coordinate in path)
+                    {
+                        if (map.TryGetHex(coordinate, out var hex) && hex.Terrain == TerrainType.ClearSpace)
+                            hex.Terrain = TerrainType.Tradelane;
+                    }
+                    remaining -= path.Count;
                 }
-                remaining -= path.Count;
 
                 connected.Add(to);
                 unconnected.Remove(to);
@@ -213,6 +222,68 @@ namespace StarBound.Map
             }
 
             return placed;
+        }
+
+        // Wormholes only function in gameplay as a pair (see
+        // Match.OtherWormholeDestinations) — a lone wormhole has nowhere
+        // to travel to — so they're placed two at a time. Every wormhole
+        // hex placed (not just the two within one pair) must stay at
+        // least MinWormholeDistance from every OTHER wormhole hex already
+        // on the map — a second pair placed near a first pair is exactly
+        // as wrong as the two hexes within one pair being close. The
+        // minimum distance is a hard rule, not best-effort: if no valid
+        // spot exists (map too small, or already too crowded with earlier
+        // pairs), placement just stops rather than placing a wormhole
+        // that violates it — fewer wormholes than the nominal budget
+        // (possibly zero) is the correct outcome, not a violation. Budget
+        // is a hex count, so an odd budget just leaves the last hex
+        // unspent rather than placing an unpaired wormhole.
+        private static void PlaceWormholePairs(GameMap map, Random rng, int budget)
+        {
+            var pairCount = budget / 2;
+            var placedWormholes = new List<HexCoordinate>();
+
+            for (var i = 0; i < pairCount; i++)
+            {
+                var first = placedWormholes.Count == 0
+                    ? PickRandomClearSpace(map, rng)
+                    : PickFarClearSpace(map, rng, placedWormholes, MinWormholeDistance);
+                if (first == null)
+                    break;
+
+                if (map.TryGetHex(first.Value, out var firstHex))
+                    firstHex.Terrain = TerrainType.Wormhole;
+                placedWormholes.Add(first.Value);
+
+                var second = PickFarClearSpace(map, rng, placedWormholes, MinWormholeDistance);
+                if (second == null)
+                {
+                    // No valid partner for this hex either — undo placing
+                    // it rather than leave an unpaired wormhole sitting
+                    // on the map.
+                    if (map.TryGetHex(first.Value, out var revertHex))
+                        revertHex.Terrain = TerrainType.ClearSpace;
+                    placedWormholes.RemoveAt(placedWormholes.Count - 1);
+                    break;
+                }
+
+                if (map.TryGetHex(second.Value, out var secondHex))
+                    secondHex.Terrain = TerrainType.Wormhole;
+                placedWormholes.Add(second.Value);
+            }
+        }
+
+        // A random ClearSpace hex at least minDistance from EVERY hex in
+        // origins — null if nothing on the map satisfies that. No
+        // violating fallback: the minimum distance is a hard rule (see
+        // PlaceWormholePairs).
+        private static HexCoordinate? PickFarClearSpace(GameMap map, Random rng, IReadOnlyList<HexCoordinate> origins, int minDistance)
+        {
+            var farEnough = map.Hexes
+                .Where(h => h.Terrain == TerrainType.ClearSpace && origins.All(o => HexMath.Distance(h.Coordinate, o) >= minDistance))
+                .ToList();
+
+            return farEnough.Count > 0 ? farEnough[rng.Next(farEnough.Count)].Coordinate : null;
         }
 
         private static bool IsClearSpace(GameMap map, HexCoordinate coordinate) =>

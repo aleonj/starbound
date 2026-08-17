@@ -13,6 +13,7 @@ namespace StarBound.Map
 
         private MeshRenderer highlightRenderer;
         private MeshRenderer markerRenderer;
+        private MaterialPropertyBlock propertyBlock;
 
         // Called once per tile GameObject, ever — see MapView.Render,
         // which reuses the same HexTileView instance across repeated
@@ -66,6 +67,23 @@ namespace StarBound.Map
             markerRenderer.gameObject.SetActive(tier != EngagementTier.None);
             if (tier != EngagementTier.None)
                 markerRenderer.sharedMaterial = EngagementMaterials.Get(tier);
+        }
+
+        // Per-instance data for TradelaneConnector.shader — which of the
+        // hex's own material (shared across every Tradelane tile via
+        // TerrainMaterials) doesn't vary per-instance, so connectivity to
+        // specific neighbors has to ride along on a MaterialPropertyBlock
+        // instead. Terrain never changes after map generation, so this
+        // only needs to be set once, not every SetState call — see
+        // MapView.Render, which calls this only when a Tradelane tile is
+        // first created.
+        public void SetConnectionMask(int mask)
+        {
+            propertyBlock ??= new MaterialPropertyBlock();
+            var meshRenderer = GetComponent<MeshRenderer>();
+            meshRenderer.GetPropertyBlock(propertyBlock);
+            propertyBlock.SetFloat("_ConnectionMask", mask);
+            meshRenderer.SetPropertyBlock(propertyBlock);
         }
 
         // `== null` (not just TryGetValue) because a destroyed

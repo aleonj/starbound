@@ -25,7 +25,7 @@ Shader "StarBound/AsteroidFlow"
     {
         _Color("Rock Color", Color) = (1, 1, 1, 1)
         _RimColor("Rim Color", Color) = (1, 1, 1, 1)
-        _RimPower("Rim Power", Range(0.1, 12)) = 6
+        _RimPower("Rim Power", Range(0.1, 30)) = 20
         _FacetStrength("Facet Strength", Range(0, 1)) = 0.25
         _FlowDirection("Flow Direction", Vector) = (1, 0.35, 0, 0)
         _FlowSpeed("Flow Speed", Float) = 0.06
@@ -73,63 +73,8 @@ Shader "StarBound/AsteroidFlow"
                 OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
                 OUT.localPos = (IN.uv - 0.5) * 2.0;
                 OUT.worldPos = TransformObjectToWorld(IN.positionOS.xyz).xy;
+                OUT.hexCenter = TransformObjectToWorld(float3(0.0, 0.0, 0.0)).xy;
                 return OUT;
-            }
-
-            // Bends straight lines into organic curves before they hit the
-            // cell grid below — plain Worley noise on its own has dead-
-            // straight cell boundaries meeting at sharp points, which reads
-            // as cut paving stones, not tumbling rock. Warping the sample
-            // position first is what breaks that regularity.
-            float2 StarBoundDomainWarp(float2 p, float amount)
-            {
-                float warpX = sin(p.y * 1.7 + p.x * 0.6) + sin(p.y * 3.1 - _Time.y * 0.05);
-                float warpY = sin(p.x * 1.9 - p.y * 0.5) + sin(p.x * 2.7 + _Time.y * 0.05);
-                return p + float2(warpX, warpY) * amount;
-            }
-
-            // Worley/cellular noise: f1 = distance to the nearest scattered
-            // point, f2 = distance to the second-nearest. f2 - f1 is small
-            // right at a cell boundary (a "crack" between two rocks) and
-            // large near a cell's own point (the middle of a rock).
-            //
-            // Each point's jitter is constrained to the central 60% of its
-            // cell (not the full 0..1 range) — with full-range jitter, two
-            // points in adjacent cells can occasionally land right next to
-            // each other across the shared boundary, and their rock blobs
-            // fuse into one elongated shape. Keeping points away from cell
-            // edges guarantees a minimum gap between neighbors.
-            void StarBoundWorley(float2 samplePos, out float f1, out float f2, out float cellRandom, out float2 nearestOffset)
-            {
-                float2 cell = floor(samplePos);
-                float2 localPos = frac(samplePos);
-                f1 = 8.0;
-                f2 = 8.0;
-                cellRandom = 0.0;
-                nearestOffset = float2(0.0, 0.0);
-
-                for (int y = -1; y <= 1; y++)
-                {
-                    for (int x = -1; x <= 1; x++)
-                    {
-                        float2 neighbor = float2(x, y);
-                        float2 jitter = StarBoundHash2(cell + neighbor) * 0.6 + 0.2;
-                        float2 pointPos = neighbor + jitter - localPos;
-                        float dist = length(pointPos);
-
-                        if (dist < f1)
-                        {
-                            f2 = f1;
-                            f1 = dist;
-                            cellRandom = jitter.x;
-                            nearestOffset = pointPos;
-                        }
-                        else if (dist < f2)
-                        {
-                            f2 = dist;
-                        }
-                    }
-                }
             }
 
             // The passed-in backdrop (the shared starfield, sampled once

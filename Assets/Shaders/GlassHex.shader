@@ -23,7 +23,7 @@ Shader "StarBound/GlassHex"
         _Color("Base Tint", Color) = (1, 1, 1, 1)
         _GlassAlpha("Glass Alpha", Range(0, 1)) = 0.18
         _RimColor("Rim Color", Color) = (1, 1, 1, 1)
-        _RimPower("Rim Power", Range(0.1, 12)) = 6
+        _RimPower("Rim Power", Range(0.1, 30)) = 20
         _FacetStrength("Facet Strength", Range(0, 1)) = 0.25
     }
 
@@ -62,6 +62,7 @@ Shader "StarBound/GlassHex"
                 OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
                 OUT.localPos = (IN.uv - 0.5) * 2.0;
                 OUT.worldPos = TransformObjectToWorld(IN.positionOS.xyz).xy;
+                OUT.hexCenter = TransformObjectToWorld(float3(0.0, 0.0, 0.0)).xy;
                 return OUT;
             }
 

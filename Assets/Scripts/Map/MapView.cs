@@ -51,6 +51,12 @@ namespace StarBound.Map
                     tileView = tileObject.GetComponent<HexTileView>();
                     tileView.Initialize(hex.Terrain, hexRadius);
                     tiles[hex.Coordinate] = tileView;
+
+                    // Terrain never changes after generation, so connector
+                    // connectivity (see TradelaneConnector.shader) only
+                    // needs computing once, here, not on every Render pass.
+                    if (hex.Terrain == TerrainType.Tradelane)
+                        tileView.SetConnectionMask(ComputeTradelaneConnectionMask(map, hex.Coordinate));
                 }
 
                 tileView.SetState(hex.Terrain, visibleTier, highlightState);
@@ -66,6 +72,25 @@ namespace StarBound.Map
                 Destroy(tiles[coordinate].gameObject);
                 tiles.Remove(coordinate);
             }
+        }
+
+        // Bit `dir` set means HexMath.Neighbor(coordinate, dir) is also
+        // Tradelane. Direction indices correspond to fixed world-space
+        // edge angles on the mesh (0->30deg, 1->330deg, 2->270deg,
+        // 3->210deg, 4->150deg, 5->90deg — verified against
+        // HexLayout.AxialToWorld's formula), which TradelaneConnector.shader
+        // relies on to point each connector at the correct edge.
+        private static int ComputeTradelaneConnectionMask(GameMap map, HexCoordinate coordinate)
+        {
+            var mask = 0;
+            for (var direction = 0; direction < 6; direction++)
+            {
+                var neighborCoordinate = HexMath.Neighbor(coordinate, direction);
+                if (map.TryGetHex(neighborCoordinate, out var neighborHex) && neighborHex.Terrain == TerrainType.Tradelane)
+                    mask |= 1 << direction;
+            }
+
+            return mask;
         }
     }
 }

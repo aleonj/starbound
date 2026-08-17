@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using StarBound.Core;
@@ -66,10 +67,11 @@ namespace StarBound.Tests
         [Test]
         public void Generate_EveryTradelaneHexBordersAnotherTradelaneOrAPlanet()
         {
-            // Route length is now distance-driven rather than randomized,
-            // so a single connecting hex between two close planets is
-            // valid — the invariant is "borders the route/destination",
-            // not "is part of a cluster of 2+".
+            // Every painted route hex must connect back to its chain —
+            // a route is only ever painted at all once it's confirmed to
+            // meet MinTradelaneRouteLength (see the dedicated minimum-
+            // length test below), so this invariant should hold
+            // regardless of route length.
             var map = MapGenerator.Generate(radius: 6, Difficulty.Medium, seed: 3);
 
             var tradelaneHexes = map.Hexes.Where(h => h.Terrain == TerrainType.Tradelane).ToList();
@@ -96,6 +98,108 @@ namespace StarBound.Tests
 
             Assert.GreaterOrEqual(planetCount, 2, "Test assumption failed: expected at least 2 planets for this seed.");
             Assert.Greater(tradelaneCount, 0);
+        }
+
+        [TestCase(3)]
+        [TestCase(11)]
+        [TestCase(27)]
+        public void Generate_TradelaneRoutesAreNeverShorterThanThreeHexes(int seed)
+        {
+            // A 1-2 hex "route" doesn't read as a lane, so it's never
+            // painted at all (see MapGenerator.ConnectPlanetsWithTradelanes)
+            // — flood-fill each connected cluster of Tradelane hexes and
+            // confirm none of them are that short.
+            var map = MapGenerator.Generate(radius: 8, Difficulty.Easy, seed);
+
+            var unvisited = map.Hexes.Where(h => h.Terrain == TerrainType.Tradelane)
+                .Select(h => h.Coordinate).ToHashSet();
+
+            while (unvisited.Count > 0)
+            {
+                var component = new List<HexCoordinate>();
+                var queue = new Queue<HexCoordinate>();
+                var start = unvisited.First();
+                queue.Enqueue(start);
+                unvisited.Remove(start);
+
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    component.Add(current);
+
+                    foreach (var neighbor in map.GetNeighborCoordinates(current))
+                    {
+                        if (unvisited.Remove(neighbor))
+                            queue.Enqueue(neighbor);
+                    }
+                }
+
+                Assert.GreaterOrEqual(component.Count, 3,
+                    $"Tradelane route starting near {start} has only {component.Count} hex(es) — routes shorter than 3 shouldn't be painted.");
+            }
+        }
+
+        [TestCase(0)]
+        [TestCase(5)]
+        [TestCase(19)]
+        public void Generate_EveryPairOfWormholesIsAtLeastEightApart(int seed)
+        {
+            // Deliberately checks EVERY pair of wormhole hexes on the map
+            // against each other, not just "each hex has at least one far
+            // partner" — that weaker check is exactly what let a second
+            // wormhole pair get placed right next to a first pair without
+            // being caught (MinWormholeDistance is enforced against each
+            // pair's own two hexes, but a weaker test wouldn't notice it
+            // wasn't enforced against every OTHER already-placed wormhole
+            // too).
+            var map = MapGenerator.Generate(radius: 8, Difficulty.Easy, seed);
+
+            var wormholes = map.Hexes.Where(h => h.Terrain == TerrainType.Wormhole)
+                .Select(h => h.Coordinate).ToList();
+
+            Assert.AreEqual(0, wormholes.Count % 2, "Wormholes should always come in pairs.");
+
+            for (var i = 0; i < wormholes.Count; i++)
+            {
+                for (var j = i + 1; j < wormholes.Count; j++)
+                {
+                    var distance = HexMath.Distance(wormholes[i], wormholes[j]);
+                    Assert.GreaterOrEqual(distance, 8,
+                        $"Wormholes at {wormholes[i]} and {wormholes[j]} are only {distance} apart.");
+                }
+            }
+        }
+
+        [TestCase(0)]
+        [TestCase(9)]
+        public void Generate_OnASmallMap_NeverPlacesWormholesCloserThanEight(int seed)
+        {
+            // Radius 4 (Small map size) — max possible distance between
+            // any two hexes is exactly 8, so satisfying the minimum is
+            // tight and depends heavily on where the first hex lands; it
+            // may not be achievable at all for a given seed. The minimum
+            // distance is a hard rule with no violating fallback (see
+            // MapGenerator.PickFarClearSpace) — placement just stops when
+            // no valid spot exists, so the map may end up with fewer
+            // wormholes than its nominal budget, even zero. What must
+            // never happen is a placed pair or cross-pair distance below
+            // the minimum.
+            var map = MapGenerator.Generate(radius: 4, Difficulty.Medium, seed);
+
+            var wormholes = map.Hexes.Where(h => h.Terrain == TerrainType.Wormhole)
+                .Select(h => h.Coordinate).ToList();
+
+            Assert.AreEqual(0, wormholes.Count % 2, "Wormholes should always come in pairs, even on a small map.");
+
+            for (var i = 0; i < wormholes.Count; i++)
+            {
+                for (var j = i + 1; j < wormholes.Count; j++)
+                {
+                    var distance = HexMath.Distance(wormholes[i], wormholes[j]);
+                    Assert.GreaterOrEqual(distance, 8,
+                        $"Wormholes at {wormholes[i]} and {wormholes[j]} are only {distance} apart.");
+                }
+            }
         }
     }
 }
