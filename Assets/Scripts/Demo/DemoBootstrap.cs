@@ -21,10 +21,10 @@ namespace StarBound.Demo
         private const Difficulty FixedDifficulty = Difficulty.Medium;
         private const float HexRadius = 1f;
         private const int StartingCargoCapacity = 3;
-        private const float CameraPadding = 1.8f;
         // Generous fixed size for the background quad — comfortably covers
         // the camera's view even at the largest map/most zoomed-out size
-        // (see FitCameraToMap), simpler than resizing it dynamically.
+        // (see MapCameraController's zoom-out ceiling), simpler than
+        // resizing it dynamically.
         private const float GalaxyBackgroundSize = 80f;
 
         private static MapConfirmationUI confirmationUI;
@@ -32,6 +32,8 @@ namespace StarBound.Demo
         private static ModeSelectionScreen modeSelectionScreen;
         private static MatchSetupScreen matchSetupScreen;
         private static WinScreen winScreen;
+        private static PopupDialog popupDialog;
+        private static MapCameraController mapCameraController;
         private static GameObject worldRoot;
         private static GameObject hudObject;
 
@@ -40,6 +42,7 @@ namespace StarBound.Demo
         {
             EnsureEventSystem();
             CreateGalaxyBackground();
+            EnsureMapCameraController();
 
             var confirmationUIObject = new GameObject("MapConfirmationUI", typeof(MapConfirmationUI));
             confirmationUI = confirmationUIObject.GetComponent<MapConfirmationUI>();
@@ -55,6 +58,9 @@ namespace StarBound.Demo
 
             var winScreenObject = new GameObject("WinScreen", typeof(WinScreen));
             winScreen = winScreenObject.GetComponent<WinScreen>();
+
+            var popupDialogObject = new GameObject("PopupDialog", typeof(PopupDialog));
+            popupDialog = popupDialogObject.GetComponent<PopupDialog>();
 
             ShowPreMatchFlow();
         }
@@ -98,9 +104,9 @@ namespace StarBound.Demo
             markersRoot.transform.SetParent(worldRoot.transform, false);
 
             hudObject = new GameObject("MatchHud", typeof(MatchHud));
-            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius, confirmationUI, handoffScreen, winScreen, OnNewMatchRequested);
+            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius, confirmationUI, handoffScreen, winScreen, mapCameraController, popupDialog, OnNewMatchRequested);
 
-            FitCameraToMap(mapSize.ToRadius(), HexRadius);
+            mapCameraController.Initialize(mapSize.ToRadius(), HexRadius);
         }
 
         private static void OnNewMatchRequested()
@@ -127,7 +133,7 @@ namespace StarBound.Demo
         // EventSystem to receive input at all — none exists in this
         // procedurally-built scene otherwise. Uses the new Input System's
         // module, matching the InputSystem package already used elsewhere
-        // (see MatchHud's Mouse.current usage).
+        // (see MapCameraController's Mouse/Touchscreen polling).
         private static void EnsureEventSystem()
         {
             // Just need to know one exists — ordering doesn't matter here,
@@ -139,15 +145,20 @@ namespace StarBound.Demo
             new GameObject("EventSystem", typeof(EventSystem), typeof(InputSystemUIInputModule));
         }
 
-        private static void FitCameraToMap(int radius, float hexRadius)
+        // Pinch-zoom/pan lives on the Main Camera itself (see
+        // MapCameraController) rather than as a one-shot fit — added once
+        // here, re-Initialize'd per match in StartMatch instead of
+        // recreated, since the camera GameObject is a static scene object
+        // that persists across matches.
+        private static void EnsureMapCameraController()
         {
             var camera = Camera.main;
-            if (camera == null || !camera.orthographic)
+            if (camera == null)
                 return;
 
-            camera.orthographicSize = Mathf.Max(radius * hexRadius * CameraPadding, 2f);
-            var position = camera.transform.position;
-            camera.transform.position = new Vector3(0f, 0f, position.z);
+            mapCameraController = camera.GetComponent<MapCameraController>();
+            if (mapCameraController == null)
+                mapCameraController = camera.gameObject.AddComponent<MapCameraController>();
         }
     }
 }

@@ -14,9 +14,9 @@ namespace StarBound.Economy
     {
         public const int OfferSize = 3;
 
-        public static IReadOnlyList<JobDefinition> GenerateOffer(Random rng, HexCoordinate currentPlanet, GameMap map)
+        public static IReadOnlyList<JobDefinition> GenerateOffer(Random rng, HexCoordinate currentPlanet, GameMap map, EngagementTier maxUnlockedTier)
         {
-            var candidates = BuildCandidates(currentPlanet, map);
+            var candidates = BuildCandidates(currentPlanet, map, maxUnlockedTier);
             var offerSize = Math.Min(OfferSize, candidates.Count);
             var offer = new List<JobDefinition>(offerSize);
 
@@ -30,7 +30,7 @@ namespace StarBound.Economy
             return offer;
         }
 
-        private static List<JobDefinition> BuildCandidates(HexCoordinate currentPlanet, GameMap map)
+        private static List<JobDefinition> BuildCandidates(HexCoordinate currentPlanet, GameMap map, EngagementTier maxUnlockedTier)
         {
             var candidates = new List<JobDefinition>();
 
@@ -42,7 +42,13 @@ namespace StarBound.Economy
                     candidates.Add(new JobDefinition(JobType.Mining, hex.Coordinate, distance * JobPricing.MiningRewardPerHexDistance));
                     candidates.Add(new JobDefinition(JobType.Transport, hex.Coordinate, distance * JobPricing.TransportRewardPerHexDistance));
                 }
-                else if (hex.HasEngagement)
+                // A bounty at a tier above the current phase can't actually
+                // be triggered on arrival — EngagementTrigger.TryTrigger
+                // silently no-ops for hex.Engagement > MaxUnlockedTier, and
+                // the marker itself stays hidden (see Match.HandleArrival).
+                // Excluding those here keeps the job board from offering a
+                // job the player has no way to complete yet.
+                else if (hex.HasEngagement && hex.Engagement <= maxUnlockedTier)
                 {
                     candidates.Add(new JobDefinition(JobType.BountyHunting, hex.Coordinate, JobPricing.BountyReward(hex.Engagement), hex.Engagement));
                 }

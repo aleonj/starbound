@@ -37,6 +37,7 @@ namespace StarBound.Map
             // of each other (distance 1) — same hard-rule pattern as
             // PlaceWormholePairs below, not a best-effort fallback.
             var planets = PlaceSingles(map, rng, TerrainType.PlanetOrStarport, Budget(totalHexes, distribution.PlanetOrStarport), minDistance: 2);
+            AssignPlanetNames(map, rng, planets);
             PlaceWormholePairs(map, rng, Budget(totalHexes, distribution.Wormhole));
 
             ConnectPlanetsWithTradelanes(map, planets, rng, Budget(totalHexes, distribution.Tradelane));
@@ -234,6 +235,19 @@ namespace StarBound.Map
             }
 
             return placed;
+        }
+
+        // Reuses the same rng the rest of generation threads through —
+        // keeps name assignment deterministic per seed like everything
+        // else here, rather than drawing from a separate source.
+        private static void AssignPlanetNames(GameMap map, Random rng, List<HexCoordinate> planets)
+        {
+            var names = PlanetNames.DrawUnique(rng, planets.Count);
+            for (var i = 0; i < planets.Count; i++)
+            {
+                if (map.TryGetHex(planets[i], out var hex))
+                    hex.Name = names[i];
+            }
         }
 
         // Wormholes only function in gameplay as a pair (see

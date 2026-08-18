@@ -10,6 +10,11 @@ namespace StarBound.Core
 
         public bool HasEngagement => Engagement != EngagementTier.None;
 
+        // Assigned by MapGenerator (see PlanetNames) — null for every
+        // non-planet hex. Not just cosmetic: job/shop UI text falls back
+        // to printing the raw coordinate when this is unset.
+        public string Name { get; set; }
+
         // A planet's persistent shop shelf (see PlanetShopService) — null
         // means it's never been generated yet (first visit), as opposed
         // to an empty list (every slot currently sold out, awaiting a

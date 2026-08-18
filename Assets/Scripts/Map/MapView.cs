@@ -27,10 +27,12 @@ namespace StarBound.Map
             float hexRadius,
             IReadOnlyCollection<HexCoordinate> highlighted = null,
             IReadOnlyCollection<HexCoordinate> discoveredEngagementHexes = null,
-            HexCoordinate? pendingTarget = null)
+            HexCoordinate? pendingTarget = null,
+            IReadOnlyCollection<HexCoordinate> waypoints = null)
         {
             highlighted ??= System.Array.Empty<HexCoordinate>();
             discoveredEngagementHexes ??= System.Array.Empty<HexCoordinate>();
+            waypoints ??= System.Array.Empty<HexCoordinate>();
 
             var seenCoordinates = new HashSet<HexCoordinate>();
 
@@ -38,9 +40,15 @@ namespace StarBound.Map
             {
                 seenCoordinates.Add(hex.Coordinate);
 
+                // Precedence: this-turn movement state always wins over a
+                // job waypoint — if a job's destination also happens to be
+                // a legal/pending move right now, that's the more useful
+                // thing to show.
                 var highlightState = pendingTarget.HasValue && hex.Coordinate == pendingTarget.Value
                     ? HexHighlightState.Pending
-                    : highlighted.Contains(hex.Coordinate) ? HexHighlightState.LegalTarget : HexHighlightState.None;
+                    : highlighted.Contains(hex.Coordinate) ? HexHighlightState.LegalTarget
+                    : waypoints.Contains(hex.Coordinate) ? HexHighlightState.Waypoint
+                    : HexHighlightState.None;
                 var visibleTier = EngagementVisibility.GetVisibleTier(hex, discoveredEngagementHexes);
 
                 if (!tiles.TryGetValue(hex.Coordinate, out var tileView))

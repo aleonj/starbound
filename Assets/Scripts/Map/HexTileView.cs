@@ -65,9 +65,12 @@ namespace StarBound.Map
             highlightRenderer.gameObject.SetActive(highlightState != HexHighlightState.None);
             if (highlightState != HexHighlightState.None)
             {
-                highlightRenderer.sharedMaterial = highlightState == HexHighlightState.Pending
-                    ? HighlightMaterials.PendingHighlight
-                    : HighlightMaterials.TargetHighlight;
+                highlightRenderer.sharedMaterial = highlightState switch
+                {
+                    HexHighlightState.Pending => HighlightMaterials.PendingHighlight,
+                    HexHighlightState.Waypoint => HighlightMaterials.WaypointHighlight,
+                    _ => HighlightMaterials.TargetHighlight
+                };
             }
 
             markerRenderer.gameObject.SetActive(tier != EngagementTier.None);

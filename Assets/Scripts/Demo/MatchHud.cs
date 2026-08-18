@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.EventSystems;
-using UnityEngine.InputSystem;
 using StarBound.Combat;
 using StarBound.Core;
 using StarBound.Economy;
@@ -34,6 +33,8 @@ namespace StarBound.Demo
         private MapConfirmationUI confirmationUI;
         private TurnHandoffScreen handoffScreen;
         private WinScreen winScreen;
+        private MapCameraController cameraController;
+        private PopupDialog popupDialog;
         private Action onNewMatch;
         private bool awaitingHandoff;
         private bool winScreenShown;
@@ -52,7 +53,7 @@ namespace StarBound.Demo
         private readonly List<string> combatLog = new();
         private GUIStyle headerStyle;
 
-        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, MapConfirmationUI confirmationUI, TurnHandoffScreen handoffScreen, WinScreen winScreen, Action onNewMatch)
+        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, MapConfirmationUI confirmationUI, TurnHandoffScreen handoffScreen, WinScreen winScreen, MapCameraController cameraController, PopupDialog popupDialog, Action onNewMatch)
         {
             this.match = match;
             this.mapView = mapView;
@@ -61,14 +62,30 @@ namespace StarBound.Demo
             this.confirmationUI = confirmationUI;
             this.handoffScreen = handoffScreen;
             this.winScreen = winScreen;
+            this.cameraController = cameraController;
+            this.popupDialog = popupDialog;
             this.onNewMatch = onNewMatch;
             rng = new Random();
+
+            cameraController.SetInputBlocker(IsPointerOverUi);
+            cameraController.Tapped += OnMapTapped;
 
             CreateShipMarkers();
             RefreshView();
             // Even the very first turn goes through hand-off — one code
             // path instead of special-casing match start.
             ShowHandoffForCurrentPlayer();
+        }
+
+        // Tapped is a strong reference held by the camera controller,
+        // which outlives this MatchHud (a new match destroys and
+        // recreates the HUD object without reloading the scene) — without
+        // unsubscribing, a destroyed MatchHud would stay a dangling
+        // subscriber.
+        private void OnDestroy()
+        {
+            if (cameraController != null)
+                cameraController.Tapped -= OnMapTapped;
         }
 
         // Hides the whole board (see OnGUI's awaitingHandoff guard) behind
@@ -87,33 +104,22 @@ namespace StarBound.Demo
             RefreshView();
         }
 
-        private void Update()
+        // Fired by MapCameraController once per completed tap (press +
+        // release under its drag threshold) that didn't start over UI —
+        // replaces the old direct Mouse.current polling in Update, which
+        // fired on press rather than release and so had no way to tell a
+        // tap apart from the start of a pan/pinch drag.
+        private void OnMapTapped(Vector2 screenPosition)
         {
             if (match == null || selectedDie == null || !match.CanMove)
                 return;
-
-            var mouse = Mouse.current;
-            if (mouse == null || !mouse.leftButton.wasPressedThisFrame)
-                return;
-
-            // A click already consumed by UGUI (e.g. the Confirm/Cancel
-            // buttons) must not also be interpreted as a world hex click —
-            // Update polls Mouse.current directly, independent of the
-            // UGUI event pipeline that handled the button press.
-            if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
-                return;
-
-            var mouseScreenPosition = mouse.position.ReadValue();
-            var mouseGuiPosition = new Vector2(mouseScreenPosition.x, Screen.height - mouseScreenPosition.y);
-            if (HudRect.Contains(mouseGuiPosition))
-                return; // click landed on the HUD, not the map
 
             var camera = Camera.main;
             if (camera == null)
                 return;
 
             var distanceFromCamera = Mathf.Abs(camera.transform.position.z);
-            var worldPoint = camera.ScreenToWorldPoint(new Vector3(mouseScreenPosition.x, mouseScreenPosition.y, distanceFromCamera));
+            var worldPoint = camera.ScreenToWorldPoint(new Vector3(screenPosition.x, screenPosition.y, distanceFromCamera));
             var targetCoordinate = HexLayout.WorldToAxial(worldPoint, hexRadius);
 
             // Illegal targets aren't selectable at all — no attempted
@@ -127,6 +133,20 @@ namespace StarBound.Demo
             lastMessage = null;
             RefreshView();
             confirmationUI.Show(ConfirmPendingMove, CancelPendingMove);
+        }
+
+        // Used by MapCameraController to reject a gesture that starts
+        // over UI, so dragging from the HUD panel never pans the map
+        // underneath it. Covers both UGUI (e.g. the Confirm/Cancel
+        // buttons) and the IMGUI HudRect, which EventSystem doesn't know
+        // about at all since IMGUI isn't part of its raycasting pipeline.
+        private bool IsPointerOverUi(Vector2 screenPosition)
+        {
+            if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+                return true;
+
+            var guiPosition = new Vector2(screenPosition.x, Screen.height - screenPosition.y);
+            return HudRect.Contains(guiPosition);
         }
 
         private void ConfirmPendingMove()
@@ -287,9 +307,14 @@ namespace StarBound.Demo
                 // the Shop offer above.
                 if (showJobBoard && !jobOfferRolledThisTurn)
                 {
-                    jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map);
+                    jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map, match.MaxUnlockedTier);
                     jobOfferRolledThisTurn = true;
                 }
+
+                // Show/hide each offer's destination as a waypoint the
+                // moment the board opens/closes, not just on the next
+                // unrelated state change.
+                RefreshView();
             }
             GUI.enabled = true;
 
@@ -384,7 +409,7 @@ namespace StarBound.Demo
         private void DrawShopPanel()
         {
             GUILayout.Space(5);
-            GUILayout.Label("-- Shop --", headerStyle);
+            GUILayout.Label($"-- Shop: {HexDisplayName(match.CurrentPlayer.Position)} --", headerStyle);
 
             // Snapshot before iterating — same reasoning as DrawHeldItems:
             // buying can mutate the underlying offer mid-loop.
@@ -392,8 +417,11 @@ namespace StarBound.Demo
             {
                 if (GUILayout.Button($"Buy {item.Name} — {item.Price}"))
                 {
-                    var result = match.BuyItem(item);
-                    lastMessage = result.Success ? $"Bought {item.Name}." : $"Purchase failed: {result.FailureReason}";
+                    popupDialog.ShowConfirmation("Confirm Purchase", $"Buy {item.Name} for ${item.Price}?", "Buy", () =>
+                    {
+                        var result = match.BuyItem(item);
+                        lastMessage = result.Success ? $"Bought {item.Name}." : $"Purchase failed: {result.FailureReason}";
+                    });
                 }
             }
 
@@ -404,8 +432,11 @@ namespace StarBound.Demo
             {
                 if (GUILayout.Button($"Buy {ItemPool.WormholeDevice.Name} — {ItemPool.WormholeDevice.Price}"))
                 {
-                    var result = match.BuyItem(ItemPool.WormholeDevice);
-                    lastMessage = result.Success ? $"Bought {ItemPool.WormholeDevice.Name}." : $"Purchase failed: {result.FailureReason}";
+                    popupDialog.ShowConfirmation("Confirm Purchase", $"Buy {ItemPool.WormholeDevice.Name} for ${ItemPool.WormholeDevice.Price}?", "Buy", () =>
+                    {
+                        var result = match.BuyItem(ItemPool.WormholeDevice);
+                        lastMessage = result.Success ? $"Bought {ItemPool.WormholeDevice.Name}." : $"Purchase failed: {result.FailureReason}";
+                    });
                 }
             }
 
@@ -557,7 +588,7 @@ namespace StarBound.Demo
         private void DrawJobBoardPanel()
         {
             GUILayout.Space(5);
-            GUILayout.Label("-- Job Board --", headerStyle);
+            GUILayout.Label($"-- Job Board: {HexDisplayName(match.CurrentPlayer.Position)} --", headerStyle);
 
             if (match.CurrentPlayer.ActiveJob != null)
             {
@@ -569,9 +600,9 @@ namespace StarBound.Demo
             {
                 var description = job.Type switch
                 {
-                    JobType.BountyHunting => $"Bounty ({job.BountyTier}) at {job.Destination} — ${job.Reward}",
-                    JobType.Mining => $"Mining: mine an Asteroids field, then deliver to {job.Destination} — ${job.Reward}",
-                    _ => $"{job.Type} to {job.Destination} — ${job.Reward}"
+                    JobType.BountyHunting => $"Bounty ({job.BountyTier}) at {HexDisplayName(job.Destination)} — ${job.Reward}",
+                    JobType.Mining => $"Mining: mine an Asteroids field, then deliver to {HexDisplayName(job.Destination)} — ${job.Reward}",
+                    _ => $"{job.Type} to {HexDisplayName(job.Destination)} — ${job.Reward}"
                 };
 
                 if (GUILayout.Button($"Accept: {description}"))
@@ -591,7 +622,7 @@ namespace StarBound.Demo
 
             if (job.Type == JobType.BountyHunting)
             {
-                GUILayout.Label($"Bounty ({job.BountyTier}): defeat the pirate marked at {job.Destination} (highlighted on the map) — reward ${job.Reward}.");
+                GUILayout.Label($"Bounty ({job.BountyTier}): defeat the pirate marked at {HexDisplayName(job.Destination)} (highlighted on the map) — reward ${job.Reward}.");
                 GUILayout.Label("Just move onto that hex — the fight starts automatically, same as any encounter.");
                 GUILayout.Label($"Escaping that fight voids the job and costs a ${job.Reward / 10} penalty.");
                 return;
@@ -599,7 +630,7 @@ namespace StarBound.Demo
 
             if (job.Type == JobType.Mining && !match.CurrentPlayer.HasMinedCargo)
             {
-                GUILayout.Label($"Mining: find an Asteroids field (highlighted on the map) and mine there first, then deliver to {job.Destination} — reward ${job.Reward}.");
+                GUILayout.Label($"Mining: find an Asteroids field (highlighted on the map) and mine there first, then deliver to {HexDisplayName(job.Destination)} — reward ${job.Reward}.");
 
                 if (match.CanMineAsteroid)
                 {
@@ -619,7 +650,7 @@ namespace StarBound.Demo
             }
 
             var verb = job.Type == JobType.Mining ? "Deliver the minerals" : "Drop off the passenger";
-            GUILayout.Label($"{job.Type}: {verb} at {job.Destination} (highlighted on the map) — reward ${job.Reward}.");
+            GUILayout.Label($"{job.Type}: {verb} at {HexDisplayName(job.Destination)} (highlighted on the map) — reward ${job.Reward}.");
 
             if (match.CanDeliverJob)
             {
@@ -721,7 +752,7 @@ namespace StarBound.Demo
 
                     lastMessage = wasEscape
                         ? (match.CurrentPlayer.Position != previousPosition
-                            ? $"Escaped — carried to {match.CurrentPlayer.Position}."
+                            ? $"Escaped — carried to {HexDisplayName(match.CurrentPlayer.Position)}."
                             : "Escaped — but nowhere safe nearby to be carried to.")
                         : null;
 
@@ -787,6 +818,7 @@ namespace StarBound.Demo
         private void RefreshView()
         {
             var highlighted = selectedDie != null ? ComputeLegalTargets(selectedDie) : new List<HexCoordinate>();
+            var waypoints = new List<HexCoordinate>();
 
             // Always show where the active job wants you to go next —
             // otherwise there's no way to tell. An unmined Mining job
@@ -796,20 +828,26 @@ namespace StarBound.Demo
             {
                 if (job.Type == JobType.Mining && !match.CurrentPlayer.HasMinedCargo)
                 {
-                    highlighted.AddRange(match.Map.Hexes
+                    waypoints.AddRange(match.Map.Hexes
                         .Where(hex => hex.Terrain == TerrainType.Asteroids)
                         .Select(hex => hex.Coordinate));
                 }
                 else
                 {
-                    highlighted.Add(job.Destination);
+                    waypoints.Add(job.Destination);
                 }
             }
+
+            // Job Board offers aren't accepted yet, but the player should
+            // still be able to see where each one would send them before
+            // committing.
+            if (showJobBoard && match.CurrentPlayer.ActiveJob == null)
+                waypoints.AddRange(jobOffer.Select(offer => offer.Destination));
 
             if (match.ActiveGoal is { } goal)
                 highlighted.Add(goal.TargetHex);
 
-            mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes, pendingTarget);
+            mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes, pendingTarget, waypoints);
             UpdateShipMarkers();
         }
 
@@ -827,5 +865,14 @@ namespace StarBound.Demo
 
             return results;
         }
+
+        // Falls back to the raw coordinate when the hex has no Name —
+        // correct, not just defensive, for Bounty Hunting jobs, whose
+        // Destination is the marked engagement hex and often isn't a
+        // planet at all.
+        private string HexDisplayName(HexCoordinate coordinate) =>
+            match.Map.TryGetHex(coordinate, out var hex) && !string.IsNullOrEmpty(hex.Name)
+                ? hex.Name
+                : coordinate.ToString();
     }
 }

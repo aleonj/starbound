@@ -210,7 +210,7 @@ namespace StarBound.Tests
 
             if (match.CanAcceptJob && player.ActiveJob == null)
             {
-                foreach (var job in JobOfferGenerator.GenerateOffer(rng, player.Position, match.Map))
+                foreach (var job in JobOfferGenerator.GenerateOffer(rng, player.Position, match.Map, match.MaxUnlockedTier))
                     actions.Add(() => match.AcceptJob(job));
             }
 

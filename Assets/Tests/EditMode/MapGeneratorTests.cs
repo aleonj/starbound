@@ -163,6 +163,36 @@ namespace StarBound.Tests
             }
         }
 
+        [TestCase(3)]
+        [TestCase(11)]
+        [TestCase(27)]
+        public void Generate_AssignsUniqueNamesToAllPlanets(int seed)
+        {
+            var map = MapGenerator.Generate(radius: 8, Difficulty.Easy, seed);
+
+            var names = map.Hexes.Where(h => h.Terrain == TerrainType.PlanetOrStarport)
+                .Select(h => h.Name).ToList();
+
+            Assert.IsTrue(names.All(name => !string.IsNullOrEmpty(name)), "Every planet should have a name.");
+            CollectionAssert.AllItemsAreUnique(names);
+        }
+
+        [Test]
+        public void Generate_PlanetNamesAreDeterministicForSameSeed()
+        {
+            var mapA = MapGenerator.Generate(radius: 8, Difficulty.Easy, seed: 3);
+            var mapB = MapGenerator.Generate(radius: 8, Difficulty.Easy, seed: 3);
+
+            var namesA = mapA.Hexes.Where(h => h.Terrain == TerrainType.PlanetOrStarport)
+                .OrderBy(h => h.Coordinate.Q).ThenBy(h => h.Coordinate.R)
+                .Select(h => h.Name).ToList();
+            var namesB = mapB.Hexes.Where(h => h.Terrain == TerrainType.PlanetOrStarport)
+                .OrderBy(h => h.Coordinate.Q).ThenBy(h => h.Coordinate.R)
+                .Select(h => h.Name).ToList();
+
+            CollectionAssert.AreEqual(namesA, namesB);
+        }
+
         [TestCase(0)]
         [TestCase(5)]
         [TestCase(19)]

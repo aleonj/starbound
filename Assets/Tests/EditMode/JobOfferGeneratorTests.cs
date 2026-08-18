@@ -27,7 +27,7 @@ namespace StarBound.Tests
             var otherPlanet = new HexCoordinate(2, 0);
             var distance = HexMath.Distance(currentPlanet, otherPlanet);
 
-            var offer = JobOfferGenerator.GenerateOffer(new Random(1), currentPlanet, map);
+            var offer = JobOfferGenerator.GenerateOffer(new Random(1), currentPlanet, map, EngagementTier.Easy);
 
             var mining = offer.Single(j => j.Type == JobType.Mining);
             var transport = offer.Single(j => j.Type == JobType.Transport);
@@ -43,7 +43,7 @@ namespace StarBound.Tests
             var map = BuildMap();
             var currentPlanet = new HexCoordinate(0, 0);
 
-            var offer = JobOfferGenerator.GenerateOffer(new Random(1), currentPlanet, map);
+            var offer = JobOfferGenerator.GenerateOffer(new Random(1), currentPlanet, map, EngagementTier.Easy);
 
             var bounty = offer.Single(j => j.Type == JobType.BountyHunting);
             Assert.AreEqual(new HexCoordinate(0, -1), bounty.Destination);
@@ -57,7 +57,7 @@ namespace StarBound.Tests
             var map = BuildMap();
             var currentPlanet = new HexCoordinate(0, 0);
 
-            var offer = JobOfferGenerator.GenerateOffer(new Random(1), currentPlanet, map);
+            var offer = JobOfferGenerator.GenerateOffer(new Random(1), currentPlanet, map, EngagementTier.Easy);
 
             Assert.IsFalse(offer.Any(j => j.Type != JobType.BountyHunting && j.Destination == currentPlanet));
         }
@@ -68,7 +68,7 @@ namespace StarBound.Tests
             var map = new GameMap(radius: 2, Difficulty.Medium);
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport)); // only the current planet, no other candidates
 
-            var offer = JobOfferGenerator.GenerateOffer(new Random(1), new HexCoordinate(0, 0), map);
+            var offer = JobOfferGenerator.GenerateOffer(new Random(1), new HexCoordinate(0, 0), map, EngagementTier.Easy);
 
             Assert.AreEqual(0, offer.Count);
         }
@@ -79,8 +79,8 @@ namespace StarBound.Tests
             var map = BuildMap();
             var currentPlanet = new HexCoordinate(0, 0);
 
-            var offerA = JobOfferGenerator.GenerateOffer(new Random(7), currentPlanet, map);
-            var offerB = JobOfferGenerator.GenerateOffer(new Random(7), currentPlanet, map);
+            var offerA = JobOfferGenerator.GenerateOffer(new Random(7), currentPlanet, map, EngagementTier.Easy);
+            var offerB = JobOfferGenerator.GenerateOffer(new Random(7), currentPlanet, map, EngagementTier.Easy);
 
             CollectionAssert.AreEqual(
                 offerA.Select(j => (j.Type, j.Destination, j.Reward)).ToList(),
