@@ -21,9 +21,13 @@ namespace StarBound.Demo
     // harness, not the polished [UI] backlog screens.
     public class MatchHud : MonoBehaviour
     {
-        private static readonly Rect HudRect = new(10, 10, 360, 620);
         private static readonly Color PlayerOneColor = new(0.2f, 0.9f, 0.9f);
         private static readonly Color PlayerTwoColor = new(0.95f, 0.3f, 0.7f);
+        // Deliberately distinct from the yellow-legal/cyan-pending/
+        // purple-waypoint highlight language (see HighlightMaterials) —
+        // this isn't a movement affordance, so it shouldn't read as one.
+        private static readonly Color LocateFlashColor = new(1f, 0.92f, 0.55f);
+        private const float LocateFlashDuration = 1f;
 
         private Match match;
         private MapView mapView;
@@ -52,6 +56,8 @@ namespace StarBound.Demo
         private string lastMessage;
         private readonly List<string> combatLog = new();
         private GUIStyle headerStyle;
+        private bool legacySkinScaled;
+        private MatchHudChrome chrome;
 
         public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, MapConfirmationUI confirmationUI, TurnHandoffScreen handoffScreen, WinScreen winScreen, MapCameraController cameraController, PopupDialog popupDialog, Action onNewMatch)
         {
@@ -69,6 +75,12 @@ namespace StarBound.Demo
 
             cameraController.SetInputBlocker(IsPointerOverUi);
             cameraController.Tapped += OnMapTapped;
+
+            // Created fresh here rather than once in DemoBootstrap like
+            // the other UGUI screens — every value it shows is per-match
+            // state, so it has no reason to survive across matches.
+            chrome = gameObject.AddComponent<MatchHudChrome>();
+            chrome.Initialize(OnAttackClicked, OnEndTurnClicked, OnShopToggleClicked, OnJobBoardToggleClicked, OnLocatePlayerClicked);
 
             CreateShipMarkers();
             RefreshView();
@@ -101,6 +113,15 @@ namespace StarBound.Demo
         {
             awaitingHandoff = false;
             handoffScreen.Hide();
+            // Recenter on whoever's turn it now is — same PanTo the
+            // locate-player button uses, which already clamps to the
+            // map's pan bounds (see MapCameraController.ClampPosition),
+            // so a player near the map's edge still gets centered as
+            // closely as the bounds allow rather than snapping oddly.
+            // Runs on every hand-off including the very first turn (see
+            // Initialize's own comment on why hand-off isn't special-
+            // cased for match start).
+            cameraController.PanTo(HexLayout.AxialToWorld(match.CurrentPlayer.Position, hexRadius));
             RefreshView();
         }
 
@@ -135,19 +156,47 @@ namespace StarBound.Demo
             confirmationUI.Show(ConfirmPendingMove, CancelPendingMove);
         }
 
+        // Legacy overlay Rect for whatever's still IMGUI (Shop/Job
+        // Board/Trade/Wormhole/Engagement) — docked in the corner
+        // opposite the new UGUI chrome (which docks top-left) so the two
+        // can never collide regardless of chrome's actual (dynamically
+        // sized) height, and computed from Screen.width/height instead of
+        // a hardcoded box so at least this much scales with screen size
+        // too. Everything drawn in here gets its own dedicated UGUI story
+        // soon (Shop/Job Board/Trade/Wormhole/Engagement are all already
+        // tracked separately), so this is a deliberately temporary shape.
+        private static Rect ComputeLegacyOverlayRect() =>
+            new(Screen.width - 480f, 10f, 460f, Screen.height - 20f);
+
         // Used by MapCameraController to reject a gesture that starts
         // over UI, so dragging from the HUD panel never pans the map
-        // underneath it. Covers both UGUI (e.g. the Confirm/Cancel
-        // buttons) and the IMGUI HudRect, which EventSystem doesn't know
-        // about at all since IMGUI isn't part of its raycasting pipeline.
+        // underneath it. EventSystem now covers the UGUI chrome for
+        // free; the manual Rect check below only matters for the
+        // still-IMGUI legacy overlay, which EventSystem doesn't know
+        // about at all since IMGUI isn't part of its raycasting pipeline
+        // — and only while something's actually drawn there, so an
+        // inactive overlay doesn't block map taps over empty screen space.
         private bool IsPointerOverUi(Vector2 screenPosition)
         {
             if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
                 return true;
 
+            if (!IsLegacyOverlayActive())
+                return false;
+
             var guiPosition = new Vector2(screenPosition.x, Screen.height - screenPosition.y);
-            return HudRect.Contains(guiPosition);
+            return ComputeLegacyOverlayRect().Contains(guiPosition);
         }
+
+        // True whenever the still-IMGUI legacy overlay (Shop/Job Board
+        // panel content, Trade, Wormhole, Engagement) is actually
+        // drawing something — used both to gate input-blocking above and
+        // to decide whether OnGUI's BeginArea should paint a background
+        // at all (see OnGUI — GUI.skin.box has its own default dark
+        // translucent fill that would otherwise render as an unexplained
+        // shadow over an empty Rect the rest of the time).
+        private bool IsLegacyOverlayActive() =>
+            showShop || showJobBoard || match.CanAttackOpponent || match.CanTravelWormhole || match.IsInEngagement;
 
         private void ConfirmPendingMove()
         {
@@ -183,6 +232,137 @@ namespace StarBound.Demo
             RefreshView();
         }
 
+        // Chrome's dice-tray/Roll/Attack/End Turn callbacks — extracted
+        // out of the old inline IMGUI button blocks so both the UGUI
+        // chrome and (were it ever needed) the old IMGUI code could call
+        // the same logic.
+        private void OnRollDiceClicked()
+        {
+            match.RollDice(rng);
+            lastMessage = null;
+            RefreshView();
+        }
+
+        private void OnDieClicked(RolledDie die)
+        {
+            selectedDie = die == selectedDie ? null : die;
+            pendingTarget = null;
+            confirmationUI.Hide();
+            RefreshView();
+        }
+
+        private void OnAttackClicked()
+        {
+            match.AttackOpponent();
+            lastMessage = null;
+            combatLog.Clear();
+        }
+
+        private void OnShopToggleClicked()
+        {
+            showShop = !showShop;
+            // The planet's shelf persists in Match/Hex now (see
+            // PlanetShopService) — fetching it fresh on every open just
+            // reads whatever's currently there, it doesn't reroll it.
+            if (showShop)
+                shopOffer = match.GetShopOffer(rng);
+        }
+
+        private void OnJobBoardToggleClicked()
+        {
+            showJobBoard = !showJobBoard;
+            // Roll once per turn, not once per open — same reasoning as
+            // the Shop offer above.
+            if (showJobBoard && !jobOfferRolledThisTurn)
+            {
+                jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map, match.MaxUnlockedTier);
+                jobOfferRolledThisTurn = true;
+            }
+
+            // Show/hide each offer's destination as a waypoint the
+            // moment the board opens/closes, not just on the next
+            // unrelated state change.
+            RefreshView();
+        }
+
+        private void OnLocatePlayerClicked()
+        {
+            var worldPosition = HexLayout.AxialToWorld(match.CurrentPlayer.Position, hexRadius);
+            cameraController.PanTo(worldPosition);
+            mapView.FlashHex(match.CurrentPlayer.Position, LocateFlashColor, LocateFlashDuration);
+        }
+
+        private void OnEndTurnClicked()
+        {
+            match.EndTurn();
+            selectedDie = null;
+            pendingTarget = null;
+            confirmationUI.Hide();
+            showShop = false;
+            showJobBoard = false;
+            jobOfferRolledThisTurn = false;
+            lastMessage = null;
+            combatLog.Clear();
+            RefreshView();
+            ShowHandoffForCurrentPlayer();
+        }
+
+        // Text-only chrome sync, every frame — mirrors IMGUI's own
+        // "just re-read live state every frame" cost model, since UGUI
+        // has no equivalent for free. Cheap: string formatting only, no
+        // GameObject allocation (the dice tray's more expensive
+        // Destroy/Instantiate rebuild stays off this path — see
+        // RefreshView/MatchHudChrome.RefreshDiceTray). This exists
+        // separately from the old input-polling Update() removed earlier
+        // in favor of event-driven map taps — unrelated purpose, just the
+        // same method name.
+        private void Update()
+        {
+            if (chrome == null || match == null)
+                return;
+
+            var chromeVisible = !awaitingHandoff && !match.IsComplete && !match.IsInEngagement;
+            chrome.SetVisible(chromeVisible);
+            // The map camera's own viewport shrinks to leave room for the
+            // dice bar (see MapCameraController.SetBottomReservedFraction)
+            // rather than the bar floating on top of a full-screen map —
+            // reset to full-screen whenever chrome (and the bar with it)
+            // isn't showing, so hand-off/engagement/the win screen don't
+            // leave the map needlessly cropped underneath them.
+            cameraController.SetBottomReservedFraction(chromeVisible ? chrome.DiceBarReservedFraction : 0f);
+            if (!chromeVisible)
+                return;
+
+            var player = match.CurrentPlayer;
+            var playerColor = player == match.PlayerOne ? PlayerOneColor : PlayerTwoColor;
+            chrome.SetHeader($"Turn: {player.DisplayName}", playerColor);
+
+            chrome.SetStats(player.Ship);
+
+            chrome.SetWins(
+                $"Wins — Easy: {player.EasyEngagementWins}  " +
+                $"Medium: {player.MediumEngagementWins}  " +
+                $"Hard: {player.HardEngagementWins}/{Player.HardWinsToVictory}");
+
+            chrome.SetActionsRemaining($"Actions remaining: {match.ActionsRemaining}/{Match.ActionsPerTurn}");
+
+            chrome.SetProgression(
+                $"Phase: {match.MaxUnlockedTier} unlocked",
+                match.ActiveVariable != MatchVariable.None ? $"Event: {DescribeVariable(match.ActiveVariable)}" : null,
+                match.ActiveGoal is { } goal ? $"Race goal: {DescribeGoal(goal)}" : null);
+
+            chrome.SetAttack(match.CanAttackOpponent, $"Attack {match.OtherPlayer.DisplayName}");
+            chrome.SetEndTurn(match.CanEndTurn);
+
+            var canShopHere = match.IsCurrentPlayerOnPlanet && match.CanShop;
+            chrome.SetShop(canShopHere, showShop ? "Close Shop" : "Open Shop");
+
+            var canVisitJobBoardHere = match.IsCurrentPlayerOnPlanet && match.CanAcceptJob;
+            chrome.SetJobBoard(canVisitJobBoardHere, showJobBoard ? "Close Job Board" : "Open Job Board");
+
+            chrome.SetMessage(lastMessage);
+        }
+
         private void OnGUI()
         {
             // Nothing from the HUD renders at all while awaiting hand-off
@@ -205,9 +385,30 @@ namespace StarBound.Demo
                 return;
             }
 
-            headerStyle ??= new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, fontSize = 14 };
+            // IMGUI has no CanvasScaler equivalent — GUI.skin's default
+            // font size is tuned for desktop pixel density and doesn't
+            // scale with the device's actual pixel ratio at all, so it
+            // renders illegibly tiny on a phone (the same physical-vs-
+            // logical scale problem the UGUI chrome had, just never
+            // fixed here since this whole region is scheduled to be
+            // replaced by dedicated UGUI screens soon — Shop/Job Board/
+            // Trade/Wormhole/Engagement, Order #9-13). This is a
+            // deliberately rough interim bump, not a real fix.
+            if (!legacySkinScaled)
+            {
+                GUI.skin.label.fontSize = 34;
+                GUI.skin.button.fontSize = 34;
+                GUI.skin.button.padding = new RectOffset(20, 20, 14, 14);
+                legacySkinScaled = true;
+            }
+            headerStyle ??= new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, fontSize = 40 };
 
-            GUILayout.BeginArea(HudRect, GUI.skin.box);
+            // GUI.skin.box paints its own dark translucent background for
+            // the whole Rect regardless of whether DrawMainPanel actually
+            // puts anything inside it — only worth that background when
+            // something's really being shown there.
+            var backgroundStyle = IsLegacyOverlayActive() ? GUI.skin.box : GUIStyle.none;
+            GUILayout.BeginArea(ComputeLegacyOverlayRect(), backgroundStyle);
 
             if (match.IsInEngagement)
                 DrawEngagementPanel();
@@ -217,111 +418,28 @@ namespace StarBound.Demo
             GUILayout.EndArea();
         }
 
+        // Shop/Job Board's toggle BUTTONS now live in the UGUI chrome
+        // (see MatchHudChrome.SetShop/SetJobBoard, wired to
+        // OnShopToggleClicked/OnJobBoardToggleClicked) — this only draws
+        // their actual panel CONTENT, and only while showShop/showJobBoard
+        // is true, so the legacy overlay Rect is empty (and out of the
+        // way) the rest of the time instead of permanently competing with
+        // chrome for the same on-screen space.
         private void DrawMainPanel()
         {
-            GUILayout.Label($"Turn: {match.CurrentPlayer.DisplayName}", headerStyle);
-            DrawShipStats(match.CurrentPlayer.Ship);
-            GUILayout.Label(
-                $"Wins — Easy: {match.CurrentPlayer.EasyEngagementWins}  " +
-                $"Medium: {match.CurrentPlayer.MediumEngagementWins}  " +
-                $"Hard: {match.CurrentPlayer.HardEngagementWins}/{Player.HardWinsToVictory}");
-            GUILayout.Label($"Actions remaining: {match.ActionsRemaining}/{Match.ActionsPerTurn}");
-
-            DrawProgressionStatus();
-
-            GUILayout.Space(10);
-
-            if (match.CurrentHand == null)
-            {
-                if (GUILayout.Button("Roll Dice"))
-                {
-                    match.RollDice(rng);
-                    lastMessage = null;
-                    RefreshView();
-                }
-            }
-            else if (match.CanMove)
-            {
-                GUILayout.Label(match.IsCurrentPlayerOnPlanet
-                    ? "Docked — pick a die to keep traveling, or browse the market (browsing is free):"
-                    : "Dice — pick one, then click a highlighted hex on the map:");
-                foreach (var die in match.CurrentHand.Dice)
-                {
-                    if (die.IsSpent)
-                    {
-                        GUILayout.Label($"  {die.Terrain} (spent)");
-                        continue;
-                    }
-
-                    var label = die == selectedDie ? $"> {die.Terrain} <" : die.Terrain.ToString();
-                    if (GUILayout.Button(label))
-                    {
-                        selectedDie = die == selectedDie ? null : die;
-                        pendingTarget = null;
-                        confirmationUI.Hide();
-                        RefreshView();
-                    }
-                }
-            }
-            else
-            {
-                GUILayout.Label("No actions left to move with this turn.");
-                foreach (var die in match.CurrentHand.Dice)
-                    GUILayout.Label($"  {die.Terrain}{(die.IsSpent ? " (spent)" : "")}");
-            }
-
             if (match.CanTravelWormhole)
                 DrawWormholeTravelPanel();
 
             GUILayout.Space(10);
 
-            var canShopHere = match.IsCurrentPlayerOnPlanet && match.CanShop;
-            GUI.enabled = canShopHere;
-            if (GUILayout.Button(showShop ? "Close Shop" : "Open Shop"))
-            {
-                showShop = !showShop;
-                // The planet's shelf persists in Match/Hex now (see
-                // PlanetShopService) — fetching it fresh on every open just
-                // reads whatever's currently there, it doesn't reroll it.
-                if (showShop)
-                    shopOffer = match.GetShopOffer(rng);
-            }
-            GUI.enabled = true;
-
-            if (match.IsCurrentPlayerOnPlanet && !match.CanShop)
-                GUILayout.Label("Market closed — no actions left this turn.");
-
-            if (showShop && canShopHere)
+            if (showShop && match.IsCurrentPlayerOnPlanet && match.CanShop)
                 DrawShopPanel();
             else
                 showShop = false;
 
             GUILayout.Space(10);
 
-            var canVisitJobBoardHere = match.IsCurrentPlayerOnPlanet && match.CanAcceptJob;
-            GUI.enabled = canVisitJobBoardHere;
-            if (GUILayout.Button(showJobBoard ? "Close Job Board" : "Open Job Board"))
-            {
-                showJobBoard = !showJobBoard;
-                // Roll once per turn, not once per open — same reasoning as
-                // the Shop offer above.
-                if (showJobBoard && !jobOfferRolledThisTurn)
-                {
-                    jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map, match.MaxUnlockedTier);
-                    jobOfferRolledThisTurn = true;
-                }
-
-                // Show/hide each offer's destination as a waypoint the
-                // moment the board opens/closes, not just on the next
-                // unrelated state change.
-                RefreshView();
-            }
-            GUI.enabled = true;
-
-            if (match.IsCurrentPlayerOnPlanet && !match.CanAcceptJob)
-                GUILayout.Label("Job board closed — no actions left this turn.");
-
-            if (showJobBoard && canVisitJobBoardHere)
+            if (showJobBoard && match.IsCurrentPlayerOnPlanet && match.CanAcceptJob)
                 DrawJobBoardPanel();
             else
                 showJobBoard = false;
@@ -334,53 +452,14 @@ namespace StarBound.Demo
             if (match.CanAttackOpponent)
             {
                 GUILayout.Label($"{match.OtherPlayer.DisplayName} is here.");
-                if (GUILayout.Button($"Attack {match.OtherPlayer.DisplayName}"))
-                {
-                    match.AttackOpponent();
-                    lastMessage = null;
-                    combatLog.Clear();
-                }
                 DrawTradePanel();
                 GUILayout.Space(10);
             }
-
-            GUI.enabled = match.CanEndTurn;
-            if (GUILayout.Button("End Turn"))
-            {
-                match.EndTurn();
-                selectedDie = null;
-                pendingTarget = null;
-                confirmationUI.Hide();
-                showShop = false;
-                showJobBoard = false;
-                jobOfferRolledThisTurn = false;
-                lastMessage = null;
-                combatLog.Clear();
-                RefreshView();
-                ShowHandoffForCurrentPlayer();
-            }
-            GUI.enabled = true;
-
-            if (lastMessage != null)
-                GUILayout.Label(lastMessage);
         }
 
-        // Read-only status block for the progression mechanic (see
-        // MatchProgressionService) — current phase, the persisting
-        // variable in play (if any), and the current race-to-complete
-        // goal (if any). The goal's target hex is also highlighted on the
-        // map, same as an active job's destination — see RefreshView.
-        private void DrawProgressionStatus()
-        {
-            GUILayout.Label($"Phase: {match.MaxUnlockedTier} unlocked");
-
-            if (match.ActiveVariable != MatchVariable.None)
-                GUILayout.Label($"Event: {DescribeVariable(match.ActiveVariable)}");
-
-            if (match.ActiveGoal is { } goal)
-                GUILayout.Label($"Race goal: {DescribeGoal(goal)}");
-        }
-
+        // Still used by DescribeVariable/DescribeGoal's callers — see
+        // Update(), which builds the same progression text for the UGUI
+        // chrome now instead of this method's old IMGUI labels.
         private static string DescribeVariable(MatchVariable variable) => variable switch
         {
             MatchVariable.MinefieldDamage => "Minefield Damage — entering a Mines hex costs 1 Hull.",
@@ -849,6 +928,20 @@ namespace StarBound.Demo
 
             mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes, pendingTarget, waypoints);
             UpdateShipMarkers();
+
+            // The one relatively expensive chrome refresh (Destroy/
+            // Instantiate on the die button row) — deliberately not on
+            // the per-frame Update() path, so it only runs at RefreshView's
+            // existing "state changed, resync" call sites (roll, die
+            // select/deselect, move confirm/cancel, end turn, mine,
+            // wormhole travel, post-engagement continue, etc.).
+            chrome?.RefreshDiceTray(
+                match.CurrentHand?.Dice ?? Array.Empty<RolledDie>(),
+                selectedDie,
+                match.CurrentHand != null,
+                match.CanMove,
+                OnRollDiceClicked,
+                OnDieClicked);
         }
 
         private List<HexCoordinate> ComputeLegalTargets(RolledDie die)

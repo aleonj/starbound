@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using StarBound.Core;
@@ -7,12 +8,21 @@ namespace StarBound.Map
     [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
     public class HexTileView : MonoBehaviour
     {
+        private static readonly int ColorId = Shader.PropertyToID("_Color");
+        private static readonly int ThrobSpeedId = Shader.PropertyToID("_ThrobSpeed");
+        private static readonly int MinRadiusId = Shader.PropertyToID("_MinRadius");
+        private static readonly int MaxRadiusId = Shader.PropertyToID("_MaxRadius");
+        private static readonly int MaxAlphaId = Shader.PropertyToID("_MaxAlpha");
+
         private static readonly Dictionary<float, Mesh> HexMeshCache = new();
         private static readonly Dictionary<float, Mesh> MarkerMeshCache = new();
 
         private MeshRenderer highlightRenderer;
         private MeshRenderer markerRenderer;
+        private MeshRenderer flashRenderer;
         private MaterialPropertyBlock propertyBlock;
+        private MaterialPropertyBlock flashPropertyBlock;
+        private Coroutine flashCoroutine;
 
         // Called once per tile GameObject, ever — see MapView.Render,
         // which reuses the same HexTileView instance across repeated
@@ -53,6 +63,20 @@ namespace StarBound.Map
             markerRenderer = marker.GetComponent<MeshRenderer>();
             markerRenderer.sortingOrder = 1;
             marker.SetActive(false);
+
+            // One-shot "look here" pulse (see Flash) — a separate
+            // renderer from highlightRenderer above so it never fights
+            // with SetState's own persistent LegalTarget/Pending/
+            // Waypoint repaint logic; drawn above it (sortingOrder 4 vs
+            // 3) so a flash stays visible even on a hex that's also
+            // currently highlighted for another reason.
+            var flash = new GameObject("Flash", typeof(MeshFilter), typeof(MeshRenderer));
+            flash.transform.SetParent(transform, false);
+            flash.GetComponent<MeshFilter>().sharedMesh = GetOrCreate(HexMeshCache, hexRadius * 0.95f);
+            flashRenderer = flash.GetComponent<MeshRenderer>();
+            flashRenderer.sharedMaterial = HighlightMaterials.FlashHighlight;
+            flashRenderer.sortingOrder = 4;
+            flash.SetActive(false);
         }
 
         // Called on every Render pass after the first — repaints the
@@ -76,6 +100,50 @@ namespace StarBound.Map
             markerRenderer.gameObject.SetActive(tier != EngagementTier.None);
             if (tier != EngagementTier.None)
                 markerRenderer.sharedMaterial = EngagementMaterials.Get(tier);
+        }
+
+        // A one-shot attention pulse (e.g. "locate my ship") — distinct
+        // from SetState's persistent LegalTarget/Pending/Waypoint
+        // highlights, which are re-derived every Render call and have no
+        // "this decays after N seconds" concept. Safe to run as a
+        // coroutine directly on this instance because MapView keeps
+        // HexTileView instances alive and reused for the whole match
+        // (see MapView.Render's tiles dictionary) rather than destroying
+        // and recreating them — a Render call mid-flash won't interrupt it.
+        public void Flash(Color color, float duration)
+        {
+            if (flashCoroutine != null)
+                StopCoroutine(flashCoroutine);
+            flashCoroutine = StartCoroutine(FlashRoutine(color, duration));
+        }
+
+        private IEnumerator FlashRoutine(Color color, float duration)
+        {
+            flashPropertyBlock ??= new MaterialPropertyBlock();
+            flashRenderer.gameObject.SetActive(true);
+
+            var elapsed = 0f;
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                var fadeOut = 1f - Mathf.Clamp01(elapsed / duration);
+
+                flashRenderer.GetPropertyBlock(flashPropertyBlock);
+                flashPropertyBlock.SetColor(ColorId, color);
+                // No throb, fixed near-edge ring — a flash should read as
+                // one clean pulse, not the same continuously-throbbing
+                // look SetState's persistent highlights use.
+                flashPropertyBlock.SetFloat(ThrobSpeedId, 0f);
+                flashPropertyBlock.SetFloat(MinRadiusId, 0.92f);
+                flashPropertyBlock.SetFloat(MaxRadiusId, 0.92f);
+                flashPropertyBlock.SetFloat(MaxAlphaId, fadeOut);
+                flashRenderer.SetPropertyBlock(flashPropertyBlock);
+
+                yield return null;
+            }
+
+            flashRenderer.gameObject.SetActive(false);
+            flashCoroutine = null;
         }
 
         // Per-instance data for TradelaneConnector.shader — which of the

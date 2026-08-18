@@ -82,6 +82,16 @@ namespace StarBound.Map
             }
         }
 
+        // One-shot attention pulse on a specific hex (e.g. "locate my
+        // ship") — a no-op if the coordinate isn't a known tile. See
+        // HexTileView.Flash for why this is independent of the
+        // highlighted/pendingTarget/waypoints state Render manages above.
+        public void FlashHex(HexCoordinate coordinate, Color color, float duration)
+        {
+            if (tiles.TryGetValue(coordinate, out var tileView))
+                tileView.Flash(color, duration);
+        }
+
         // Bit `dir` set means HexMath.Neighbor(coordinate, dir) is also
         // Tradelane. Direction indices correspond to fixed world-space
         // edge angles on the mesh (0->30deg, 1->330deg, 2->270deg,

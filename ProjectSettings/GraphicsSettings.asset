@@ -45,6 +45,8 @@ GraphicsSettings:
   - {fileID: 4800000, guid: 84fdf05b6e2724e95a03f67b413d0afb, type: 3}
   - {fileID: 4800000, guid: 9f3d7b7122efc419bb02c91763f45b4c, type: 3}
   - {fileID: 4800000, guid: 2b47e33b4c9914f1aa1d3a56b6409169, type: 3}
+  - {fileID: 4800000, guid: 5099c4ab99d54c4b876a49b489b03b1f, type: 3}
+  - {fileID: 4800000, guid: a15aaf5eac0642c8b6c1d2ce4123db69, type: 3}
   m_PreloadedShaders: []
   m_PreloadShadersBatchTimeLimit: -1
   m_GraphicsStateCollection: {fileID: 0}

@@ -64,8 +64,9 @@ namespace StarBound.Map
 
         // Lets a consumer (MatchHud) reject gestures that start over its
         // own UI without this controller needing to know anything about
-        // game-specific UI layout (e.g. the IMGUI HudRect, which isn't
-        // covered by EventSystem.IsPointerOverGameObject()).
+        // game-specific UI layout (e.g. MatchHud's still-IMGUI legacy
+        // overlay Rect, which isn't covered by
+        // EventSystem.IsPointerOverGameObject()).
         public void SetInputBlocker(Func<Vector2, bool> blocker)
         {
             inputBlocker = blocker;
@@ -279,6 +280,49 @@ namespace StarBound.Map
             position.x = Mathf.Clamp(position.x, -maxPanX, maxPanX);
             position.y = Mathf.Clamp(position.y, -maxPanY, maxPanY);
             orthoCamera.transform.position = position;
+        }
+
+        // Shrinks the camera's own rendered viewport to leave room for a
+        // persistent bottom UI dock (the dice bar) instead of drawing the
+        // map full-screen underneath it — so a hex the player wants to
+        // reach can never end up hidden behind the dock. Deliberately
+        // leaves orthographicSize untouched: with pixelWidth unchanged
+        // and only pixelHeight shrinking, Camera.aspect widens by
+        // exactly the same ratio the visible height shrinks by, which
+        // keeps world-units-per-pixel identical on both axes (a uniform
+        // zoom-out, not a stretch/squish) — verified via the standard
+        // orthographic aspect/halfWidth relationship, not guessed.
+        //
+        // Takes a fraction directly rather than a pixel amount divided
+        // by Screen.height here — confirmed via a runtime log that under
+        // Device Simulator, this camera's actual render target
+        // (Camera.pixelRect) doesn't match what Screen.height reports at
+        // all (pixelRect.height ~1004px against a reported Screen.height
+        // of 2532), which silently produced a fraction ~40x too small.
+        // The caller (MatchHudChrome.DiceBarReservedFraction) computes
+        // this ratio entirely within UI canvas space instead, which
+        // isn't subject to that mismatch.
+        public void SetBottomReservedFraction(float fraction)
+        {
+            fraction = Mathf.Clamp01(fraction);
+            orthoCamera.rect = new Rect(0f, fraction, 1f, 1f - fraction);
+        }
+
+        // Instant recenter — e.g. a "locate my ship" HUD button. Reuses
+        // the same ClampPosition every pan/zoom mutator above already
+        // goes through, so this can never place the camera outside the
+        // map's established pan bounds. Deliberately instant rather than
+        // animated — this project has no Lerp/coroutine-driven camera
+        // movement anywhere yet, and a smooth pan isn't needed here since
+        // the destination hex flashes on its own (see MapView.FlashHex)
+        // to draw the eye once the camera lands.
+        public void PanTo(Vector3 worldPosition)
+        {
+            var position = orthoCamera.transform.position;
+            position.x = worldPosition.x;
+            position.y = worldPosition.y;
+            orthoCamera.transform.position = position;
+            ClampPosition();
         }
 
         private bool IsBlocked(Vector2 screenPosition) => inputBlocker != null && inputBlocker(screenPosition);
