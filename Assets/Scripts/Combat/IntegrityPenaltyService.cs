@@ -15,6 +15,7 @@ namespace StarBound.Combat
                 return false;
 
             player.Ship.ClearMoneyAndItems();
+            player.Ship.ResetIntegrityStats();
 
             var nearestPlanet = FindNearestPlanetOrStarport(map, player.Position);
             if (nearestPlanet != null)

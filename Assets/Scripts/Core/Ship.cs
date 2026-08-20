@@ -118,5 +118,18 @@ namespace StarBound.Core
             Money = 0;
             heldItems.Clear();
         }
+
+        // [Combat] Bug: Hull/Energy not reset after zero-integrity penalty
+        // — without this, a depleted player was left stuck at 0 Hull/
+        // Energy with no money to repair either (see ClearMoneyAndItems
+        // above), unable to meaningfully continue. Resets both stats
+        // together, not just whichever one triggered the penalty, since
+        // this is a fresh start after respawning — same "everything reset"
+        // treatment as the money/items wipe.
+        public void ResetIntegrityStats()
+        {
+            stats[CoreStat.Hull] = DefaultStatValue;
+            stats[CoreStat.Energy] = DefaultStatValue;
+        }
     }
 }

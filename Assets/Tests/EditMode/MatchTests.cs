@@ -324,8 +324,10 @@ namespace StarBound.Tests
 
             Assert.AreEqual(0, p1.EasyEngagementWins);
             Assert.IsFalse(p1.HasWonMatch);
-            Assert.AreEqual(0, p2.Ship.GetStat(CoreStat.Hull));
-            Assert.AreEqual(0, p2.Ship.Money); // integrity penalty clears money/items
+            // Integrity penalty clears money/items and resets Hull back to
+            // the default (not left stuck at 0 — see Ship.ResetIntegrityStats).
+            Assert.AreEqual(Ship.DefaultStatValue, p2.Ship.GetStat(CoreStat.Hull));
+            Assert.AreEqual(0, p2.Ship.Money);
             Assert.AreEqual(new HexCoordinate(2, 0), p2.Position); // relocated to nearest planet
         }
 
@@ -603,8 +605,11 @@ namespace StarBound.Tests
             p1.AcceptJob(job);
             p1.Position = new HexCoordinate(2, 0);
 
-            match.RollDice(new Random(1));
-
+            // Deliberately not rolling first — CanDeliverJob/DeliverJob
+            // don't require it (see CanShop's own doc comment), and
+            // rolling now spends the Move session's action (see
+            // Match.RollDice), which would eat into the "one action still
+            // available afterward" this test is actually about.
             Assert.IsTrue(match.CanDeliverJob);
 
             match.DeliverJob();
@@ -612,6 +617,12 @@ namespace StarBound.Tests
             Assert.AreEqual(60, p1.Ship.Money);
             Assert.IsNull(p1.ActiveJob);
             Assert.AreEqual(1, match.ActionsRemaining);
+
+            // CanMove requires an actual rolled hand, not just a fresh
+            // action — roll now, right before checking, since this
+            // assertion is specifically about a move being genuinely
+            // available afterward, not just budget being left.
+            match.RollDice(new Random(1));
             Assert.IsTrue(match.CanMove); // one action still available, e.g. to move afterward
         }
 
@@ -660,12 +671,19 @@ namespace StarBound.Tests
             var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
             var match = new Match(map, p1, p2);
             p1.AcceptJob(new JobDefinition(JobType.Mining, new HexCoordinate(1, 0), 50));
-            match.RollDice(new Random(1));
 
+            // Not rolling first — CanMineAsteroid/MineAsteroid don't
+            // require it, and rolling now spends the Move session's own
+            // action (see Match.RollDice), which this test's "one action
+            // still available" assertion below is specifically about.
             match.MineAsteroid();
 
             Assert.IsTrue(p1.HasMinedCargo);
             Assert.AreEqual(1, match.ActionsRemaining);
+
+            // Same reasoning as DeliverJob's own fix above — CanMove needs
+            // an actual rolled hand, not just budget.
+            match.RollDice(new Random(1));
             Assert.IsTrue(match.CanMove); // one action still available
         }
 
@@ -960,7 +978,6 @@ namespace StarBound.Tests
         public void BuyItem_SecondPurchaseInSameVisit_IsFree()
         {
             var (match, p1, _) = BuildMatch();
-            match.RollDice(new Random(1));
             p1.Ship.AddMoney(1000);
             var item1 = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
             var item2 = new ItemDefinition("Shield Booster", CoreStat.Shields, 1, 50, ItemKind.Permanent);
@@ -979,9 +996,11 @@ namespace StarBound.Tests
             // Buying something and accepting a job are two separate
             // actions, not one bundled market visit — matches the
             // playtesting report that this combo shouldn't leave a third
-            // action (e.g. moving) available afterward.
+            // action (e.g. moving) available afterward. Not rolling dice
+            // here — rolling now spends an action of its own (see
+            // Match.RollDice), and Buy+AcceptJob already exhausts the
+            // 2-action budget on their own.
             var (match, p1, _) = BuildMatch();
-            match.RollDice(new Random(1));
             p1.Ship.AddMoney(50);
             var item = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
             match.BuyItem(item);
@@ -998,14 +1017,22 @@ namespace StarBound.Tests
         [Test]
         public void AcceptJob_BeforeMoving_StillLeavesMoveAvailable()
         {
+            // Rolled AFTER accepting, not before — rolling now spends the
+            // Move session's own action (see Match.RollDice), so rolling
+            // first would make AcceptJob the one that runs out of budget
+            // instead of the other way around. This order is exactly what
+            // the test name is about: accept the job with your first
+            // action, then roll and confirm the second is still there for
+            // an actual move.
             var (match, _, _) = BuildMatch();
-            match.RollDice(new Random(1));
             var job = new JobDefinition(JobType.Transport, new HexCoordinate(2, 0), 60);
 
             var result = match.AcceptJob(job);
 
             Assert.IsTrue(result.Success);
             Assert.AreEqual(1, match.ActionsRemaining);
+
+            match.RollDice(new Random(1));
             Assert.IsTrue(match.CanMove);
         }
 
@@ -1031,7 +1058,6 @@ namespace StarBound.Tests
         public void BuyItem_Fails_DoesNotSpendAnAction()
         {
             var (match, _, _) = BuildMatch();
-            match.RollDice(new Random(1));
             var tooExpensive = new ItemDefinition("Weapon Upgrade", CoreStat.Weapons, 1, 999_999, ItemKind.Permanent);
 
             var result = match.BuyItem(tooExpensive);
@@ -1055,7 +1081,10 @@ namespace StarBound.Tests
             p1.Ship.TryAddItem(ItemPool.WormholeDevice); // so the CanTravelWormhole check below is meaningful
             p2.Ship.AddMoney(100);
 
-            match.RollDice(new Random(1));
+            // Not rolling dice — none of the actions below require a hand,
+            // and rolling now spends the Move session's own action (see
+            // Match.RollDice), which would leave only one of these two
+            // actions affordable instead of both.
             match.TradeItemToOpponent(tradedItem); // action 1
             Assert.AreEqual(1, match.ActionsRemaining);
 
@@ -1086,10 +1115,14 @@ namespace StarBound.Tests
             p1.Ship.TryAddItem(item);
             p2.Ship.AddMoney(100);
 
-            match.RollDice(new Random(1));
             match.TradeItemToOpponent(item); // uses 1 of 2 actions
             Assert.AreEqual(1, match.ActionsRemaining);
 
+            // Rolled here, right before moving, rather than at the top —
+            // rolling now spends the Move session's own action (see
+            // Match.RollDice), so rolling before the trade would have made
+            // the trade the one that runs out of budget instead.
+            match.RollDice(new Random(1));
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1));
 
             Assert.IsTrue(match.IsInEngagement);

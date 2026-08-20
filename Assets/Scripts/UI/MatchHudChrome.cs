@@ -126,6 +126,7 @@ namespace StarBound.UI
         private RectTransform panelRect;
         private Material panelMaterial;
         private Image accentBar;
+        private Text turnLabelText;
         private Text headerText;
         private Button locateButton;
         private GameObject collapsibleContent;
@@ -159,10 +160,16 @@ namespace StarBound.UI
         private Button jobBoardButton;
         private Text jobBoardLabel;
         private Material jobBoardMaterial;
+        private Button tradeButton;
+        private Text tradeLabel;
+        private Material tradeMaterial;
+        private Button heldItemsButton;
+        private GameObject activeJobDivider;
         private Text activeJobStatusText;
         private Button activeJobActionButton;
         private Text activeJobActionLabel;
         private Material activeJobActionMaterial;
+        private GameObject attackDivider;
         private Button attackButton;
         private Text attackLabel;
         private Button endTurnButton;
@@ -207,7 +214,7 @@ namespace StarBound.UI
         // Set*() calls below so refreshing values every frame doesn't
         // also re-allocate a fresh closure and re-register a listener
         // every frame.
-        public void Initialize(Action onAttack, Action onEndTurn, Action onToggleShop, Action onToggleJobBoard, Action onLocatePlayer, Action onActiveJobAction)
+        public void Initialize(Action onAttack, Action onEndTurn, Action onToggleShop, Action onToggleJobBoard, Action onLocatePlayer, Action onActiveJobAction, Action onToggleHeldItems, Action onToggleTrade)
         {
             attackButton.onClick.AddListener(() => onAttack?.Invoke());
             endTurnButton.onClick.AddListener(() => onEndTurn?.Invoke());
@@ -215,6 +222,8 @@ namespace StarBound.UI
             jobBoardButton.onClick.AddListener(() => onToggleJobBoard?.Invoke());
             locateButton.onClick.AddListener(() => onLocatePlayer?.Invoke());
             activeJobActionButton.onClick.AddListener(() => onActiveJobAction?.Invoke());
+            heldItemsButton.onClick.AddListener(() => onToggleHeldItems?.Invoke());
+            tradeButton.onClick.AddListener(() => onToggleTrade?.Invoke());
         }
 
         public void SetVisible(bool visible)
@@ -249,11 +258,15 @@ namespace StarBound.UI
                 ? (dicePanelRect.rect.height + DiceBarMarginBottom + DiceBarTopGap) / canvasRect.rect.height
                 : 0f;
 
-        // Purely a player-controlled UI preference (not tied to game
-        // state, not auto-triggered) — the always-expanded panel covers
-        // enough of the map that a player who just wants to look around
-        // needs a way to shrink it down to the header strip. Stays
-        // collapsed across turns until the player taps it open again.
+        // A player-controlled UI preference — the always-expanded panel
+        // covers enough of the map that a player who just wants to look
+        // around needs a way to shrink it down to the header strip. Stays
+        // collapsed across turns until the player taps it open again. Also
+        // triggered automatically once the player rolls dice (see Collapse
+        // below) — that's the moment the map itself becomes what the
+        // player needs to see most (where the rolled dice can actually
+        // move them), so the panel gets out of the way on its own instead
+        // of waiting for a manual tap.
         private void SetCollapsed(bool collapsed)
         {
             isCollapsed = collapsed;
@@ -265,9 +278,16 @@ namespace StarBound.UI
                 collapsed ? IconGlyphMaterials.Glyph.ChevronDown : IconGlyphMaterials.Glyph.ChevronUp);
         }
 
-        public void SetHeader(string text, Color color)
+        // MatchHud calls this right after a successful dice roll — see
+        // SetCollapsed's own comment for why. A no-op (still collapses
+        // cleanly) if the panel was already collapsed.
+        public void Collapse() => SetCollapsed(true);
+
+        // "Turn:" itself is a static label (see BuildUI's nameColumn) —
+        // this only ever sets the player's name on the line below it.
+        public void SetHeader(string playerName, Color color)
         {
-            headerText.text = text;
+            headerText.text = playerName;
             headerText.color = color;
             accentBar.color = color;
             panelMaterial.SetColor("_RimColor", color);
@@ -302,6 +322,7 @@ namespace StarBound.UI
 
         public void SetAttack(bool visible, string label)
         {
+            attackDivider.SetActive(visible);
             attackButton.gameObject.SetActive(visible);
             if (visible)
                 attackLabel.text = label;
@@ -320,6 +341,7 @@ namespace StarBound.UI
         // (e.g. "not on an Asteroids field").
         public void SetActiveJob(bool visible, string statusText, string actionLabel, bool actionVisible, bool actionInteractable)
         {
+            activeJobDivider.SetActive(visible);
             activeJobStatusText.gameObject.SetActive(visible);
             if (visible)
                 activeJobStatusText.text = statusText;
@@ -359,6 +381,15 @@ namespace StarBound.UI
             jobBoardLabel.text = label;
         }
 
+        public void SetTrade(bool interactable, string label)
+        {
+            var color = interactable ? UtilityColor : DisabledColor;
+            tradeButton.interactable = interactable;
+            tradeButton.GetComponent<Image>().color = color;
+            tradeMaterial.SetColor("_RimColor", color);
+            tradeLabel.text = label;
+        }
+
         public void SetEndTurn(bool canEndTurn)
         {
             var color = canEndTurn ? ConfirmColor : DisabledColor;
@@ -378,7 +409,7 @@ namespace StarBound.UI
         // RefreshView() "state changed, resync" hook whenever the hand,
         // selection, move eligibility, or pending move actually changes.
         public void RefreshDiceTray(
-            IReadOnlyList<RolledDie> dice, RolledDie selectedDie, bool hasHand, bool canMove,
+            IReadOnlyList<RolledDie> dice, RolledDie selectedDie, bool hasHand, bool canRoll, bool canMove,
             string pendingMoveLabel, Action onRoll, Action<RolledDie> onDieClicked,
             Action onConfirmMove, Action onCancelMove)
         {
@@ -418,6 +449,15 @@ namespace StarBound.UI
 
             if (!hasHand)
             {
+                // Rolling now spends an action too (see Match.RollDice) —
+                // with none left, offer nothing to tap rather than a
+                // button that would just throw when pressed.
+                if (!canRoll)
+                {
+                    diceInstructionText.text = "No actions left to roll dice with.";
+                    return;
+                }
+
                 diceInstructionText.text = "Roll the dice to move.";
                 var (rollButton, _) = CreateButton(diceButtonRow, "Roll Dice", ConfirmColor, true,
                     GlassPanelMaterials.Style.DieButton, width: 140f, height: DieButtonHeight, fontSize: 15);
@@ -539,8 +579,11 @@ namespace StarBound.UI
             accentBarObject.GetComponent<LayoutElement>().preferredHeight = 5f;
             accentBar = accentBarObject.GetComponent<Image>();
 
-            // Header + collapse toggle share one row so the toggle is
-            // always reachable even when everything else is hidden.
+            // Header + End Turn + collapse toggle share one row so both
+            // stay reachable even when everything else is hidden — this is
+            // ALL of the collapsed panel's body content, not just a title
+            // bar, which is why it's kept deliberately compact (see
+            // nameColumn below).
             var headerRow = new GameObject("HeaderRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
             headerRow.transform.SetParent(panel.transform, false);
             var headerRowLayout = headerRow.GetComponent<HorizontalLayoutGroup>();
@@ -551,14 +594,39 @@ namespace StarBound.UI
             headerRowLayout.childControlWidth = true;
             headerRowLayout.childControlHeight = true;
 
-            headerText = CreateText(headerRow.transform, fontSize: 22, bold: true);
-            // Takes all the row's leftover width so the toggle button
-            // stays pinned at its own small fixed size next to it.
-            headerText.gameObject.AddComponent<LayoutElement>().flexibleWidth = 1f;
+            // "Turn:" / player name stacked on two short lines instead of
+            // one long "Turn: Player One" line — frees up enough width in
+            // the row for End Turn to sit right next to it, rather than
+            // needing its own full-width row below (which used to be the
+            // ONLY thing shown once the panel was collapsed, but still
+            // needed a divider + its own row height on top of the header).
+            var nameColumn = new GameObject("NameColumn", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(LayoutElement));
+            nameColumn.transform.SetParent(headerRow.transform, false);
+            var nameColumnLayout = nameColumn.GetComponent<VerticalLayoutGroup>();
+            nameColumnLayout.spacing = 0f;
+            nameColumnLayout.childAlignment = TextAnchor.UpperLeft;
+            nameColumnLayout.childForceExpandWidth = true;
+            nameColumnLayout.childForceExpandHeight = false;
+            nameColumnLayout.childControlWidth = true;
+            nameColumnLayout.childControlHeight = true;
+            // Takes all the row's leftover width so End Turn/locate/toggle
+            // stay pinned at their own small fixed sizes next to it.
+            nameColumn.GetComponent<LayoutElement>().flexibleWidth = 1f;
 
-            // Header row, not collapsibleContent — stays reachable even
-            // while the HUD is collapsed, which is exactly when a player
-            // who's panned away is most likely to want it.
+            turnLabelText = CreateText(nameColumn.transform, fontSize: 11, bold: false);
+            turnLabelText.text = "Turn:";
+            turnLabelText.color = new Color(1f, 1f, 1f, 0.6f);
+
+            headerText = CreateText(nameColumn.transform, fontSize: 16, bold: true);
+
+            var (endTurn, endTurnMat) = CreateButton(headerRow.transform, "End Turn", ConfirmColor, true,
+                GlassPanelMaterials.Style.Button, width: 88f, height: 40f, fontSize: 14);
+            endTurnButton = endTurn;
+            endTurnMaterial = endTurnMat;
+
+            // Header row, not nameColumn — stays reachable even while the
+            // HUD is collapsed, which is exactly when a player who's
+            // panned away is most likely to want it.
             var (locate, _) = CreateIconButton(headerRow.transform, IconGlyphMaterials.Glyph.LocatePin, ToggleColor,
                 GlassPanelMaterials.Style.DieButton, size: 36f);
             locateButton = locate;
@@ -626,7 +694,26 @@ namespace StarBound.UI
             jobBoardLabel = jobBoardButton.GetComponentInChildren<Text>();
             jobBoardMaterial = jobBoardMat;
 
-            CreateDivider(content);
+            var (trade, tradeMat) = CreateButton(utilityRow.transform, "Open Trade", UtilityColor, true,
+                GlassPanelMaterials.Style.Button, width: 0f, height: 44f, fontSize: 15, stretchWidth: true);
+            tradeButton = trade;
+            tradeLabel = tradeButton.GetComponentInChildren<Text>();
+            tradeMaterial = tradeMat;
+
+            // Always reachable — unlike Shop/Job Board, viewing held items
+            // has no planet/turn-phase gate, so this never needs a
+            // SetX(interactable, label) call from MatchHud's per-frame
+            // refresh; it's wired once here and left alone.
+            var (cargo, _) = CreateButton(utilityRow.transform, "View Cargo", UtilityColor, true,
+                GlassPanelMaterials.Style.Button, width: 0f, height: 44f, fontSize: 15, stretchWidth: true);
+            heldItemsButton = cargo;
+
+            // Divider hidden along with the section it introduces — a
+            // bare divider with nothing shown after it (both rows below
+            // default to hidden) would otherwise render as a stray line
+            // with no content on either side of it. See SetActiveJob.
+            activeJobDivider = CreateDivider(content);
+            activeJobDivider.SetActive(false);
             // Active job status/Mine/Deliver — see SetActiveJob's own
             // comment for why this lives here rather than inside
             // JobBoardScreen. Hidden by default; both toggled on/off
@@ -643,17 +730,15 @@ namespace StarBound.UI
             activeJobActionMaterial = activeJobActionMat;
             activeJobActionButton.gameObject.SetActive(false);
 
-            CreateDivider(content);
+            // Same "hide the divider along with its section" reasoning as
+            // activeJobDivider above — see SetAttack.
+            attackDivider = CreateDivider(content);
+            attackDivider.SetActive(false);
             var (attack, _) = CreateButton(content, "Attack", AttackColor, true,
                 GlassPanelMaterials.Style.Button, width: 0f, height: PrimaryButtonHeight, fontSize: 18, stretchWidth: true);
             attackButton = attack;
             attackLabel = attackButton.GetComponentInChildren<Text>();
             attackButton.gameObject.SetActive(false);
-
-            var (endTurn, endTurnMat) = CreateButton(content, "End Turn", ConfirmColor, true,
-                GlassPanelMaterials.Style.Button, width: 0f, height: PrimaryButtonHeight, fontSize: 18, stretchWidth: true);
-            endTurnButton = endTurn;
-            endTurnMaterial = endTurnMat;
 
             messageText = CreateText(content, fontSize: 15, bold: false);
             messageText.gameObject.SetActive(false);
@@ -810,12 +895,12 @@ namespace StarBound.UI
             return text;
         }
 
-        // width/stretchWidth: die/roll buttons pass an explicit width
-        // (their row doesn't control child width — see diceRowLayout's
-        // childControlWidth=false). Attack/End Turn pass stretchWidth
-        // instead, since they're direct children of the panel's own
-        // layout group, which already stretches children to fill the
-        // panel's content width (see BuildUI) — width is then just an
+        // width/stretchWidth: die/roll buttons and End Turn (in headerRow,
+        // alongside the name/locate/toggle) pass an explicit width, since
+        // none of those rows stretch children to fill available width.
+        // Attack passes stretchWidth instead — it's a direct child of the
+        // panel's own layout group, which DOES stretch children to fill
+        // the panel's content width (see BuildUI) — width is then just an
         // inert initial RectTransform.sizeDelta.x fallback.
         private static (Button Button, Material Material) CreateButton(Transform parent, string label, Color color, bool interactable,
             GlassPanelMaterials.Style glassStyle, float width, float height, int fontSize, bool stretchWidth = false)
@@ -957,12 +1042,13 @@ namespace StarBound.UI
         // text-heavy panel real visual structure. Stays a plain flat
         // Image (not GlassPanel-shaded) — a 1pt line has no meaningful
         // rounded-corner/rim story at that thinness.
-        private static void CreateDivider(Transform parent)
+        private static GameObject CreateDivider(Transform parent)
         {
             var dividerObject = new GameObject("Divider", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
             dividerObject.transform.SetParent(parent, false);
             dividerObject.GetComponent<LayoutElement>().preferredHeight = 1f;
             dividerObject.GetComponent<Image>().color = DividerColor;
+            return dividerObject;
         }
     }
 }

@@ -104,6 +104,38 @@ namespace StarBound.Demo
         private JobBoardScreen jobBoardScreen;
         private bool wasJobBoardVisible;
         private string jobBoardStatusMessage;
+        private HeldItemsPopup heldItemsPopup;
+        private bool showHeldItems;
+        private bool wasHeldItemsVisible;
+        private TradeNegotiationScreen tradeNegotiationScreen;
+        // True while building the very first proposal (nothing exists in
+        // the domain yet) OR while the Opponent is building their one
+        // allowed counter on top of an already-active negotiation — in
+        // both cases the screen is in Build mode. Once match.IsNegotiatingTrade
+        // is true and this is false, the screen is in Review mode instead
+        // — see RenderBuild/RenderReview's own callers below for exactly
+        // when each transition happens.
+        private bool showTradeBuilder;
+        // Mid-negotiation "pass the device" moments — a parallel,
+        // Player-typed version of the mid-fight PvP deviceHolder/
+        // HandOffDeviceTo/awaitingEngagementHandoff mechanism above (see
+        // that trio's own comments for the full reasoning; this doesn't
+        // reuse them directly since they're typed to RoundAttacker/
+        // EngagementSession). Doesn't touch awaitingHandoff or
+        // Match.CurrentPlayer — the initiator's own match turn never
+        // actually ends during a negotiation, same as it doesn't during a
+        // PvP fight.
+        private bool awaitingTradeHandoff;
+        private Player tradeDeviceHolder;
+        // Reset-tracking mirror of trackedEngagementSession — see that
+        // field's own comment for why keying off the session INSTANCE
+        // (not a visibility edge) matters.
+        private TradeNegotiation trackedTradeNegotiation;
+        // The negotiation screen's own local feedback line (a failed
+        // Send/Accept's reason) — same reasoning as shopStatusMessage
+        // above (chrome is hidden behind this full-screen overlay while
+        // it's open).
+        private string tradeStatusMessage;
         // Drives which single offer's destination shows as a map waypoint
         // (see RefreshView) — replaces the old "show every offer at once"
         // behavior the story specifically called out as ambiguous. Purely
@@ -132,13 +164,15 @@ namespace StarBound.Demo
             // the other UGUI screens — every value it shows is per-match
             // state, so it has no reason to survive across matches.
             chrome = gameObject.AddComponent<MatchHudChrome>();
-            chrome.Initialize(OnAttackClicked, OnEndTurnClicked, OnShopToggleClicked, OnJobBoardToggleClicked, OnLocatePlayerClicked, OnActiveJobActionClicked);
+            chrome.Initialize(OnAttackClicked, OnEndTurnClicked, OnShopToggleClicked, OnJobBoardToggleClicked, OnLocatePlayerClicked, OnActiveJobActionClicked, OnHeldItemsToggleClicked, OnTradeToggleClicked);
 
             // Same "created fresh per match" reasoning as chrome above —
             // every value it shows is per-engagement state.
             engagementScreen = gameObject.AddComponent<EngagementScreen>();
             shopScreen = gameObject.AddComponent<ShopScreen>();
             jobBoardScreen = gameObject.AddComponent<JobBoardScreen>();
+            heldItemsPopup = gameObject.AddComponent<HeldItemsPopup>();
+            tradeNegotiationScreen = gameObject.AddComponent<TradeNegotiationScreen>();
 
             CreateShipMarkers();
             RefreshView();
@@ -217,15 +251,14 @@ namespace StarBound.Demo
             RefreshView();
         }
 
-        // Legacy overlay Rect for whatever's still IMGUI (Shop/Job
-        // Board/Trade/Wormhole/Engagement) — docked in the corner
-        // opposite the new UGUI chrome (which docks top-left) so the two
-        // can never collide regardless of chrome's actual (dynamically
-        // sized) height, and computed from Screen.width/height instead of
-        // a hardcoded box so at least this much scales with screen size
-        // too. Everything drawn in here gets its own dedicated UGUI story
-        // soon (Shop/Job Board/Trade/Wormhole/Engagement are all already
-        // tracked separately), so this is a deliberately temporary shape.
+        // Legacy overlay Rect for whatever's still IMGUI (only Wormhole
+        // travel now) — docked in the corner opposite the new UGUI chrome
+        // (which docks top-left) so the two can never collide regardless
+        // of chrome's actual (dynamically sized) height, and computed from
+        // Screen.width/height instead of a hardcoded box so at least this
+        // much scales with screen size too. Wormhole gets its own
+        // dedicated UGUI story soon (Order #13), so this is a deliberately
+        // temporary shape.
         private static Rect ComputeLegacyOverlayRect() =>
             new(Screen.width - 480f, 10f, 460f, Screen.height - 20f);
 
@@ -249,15 +282,16 @@ namespace StarBound.Demo
             return ComputeLegacyOverlayRect().Contains(guiPosition);
         }
 
-        // True whenever the still-IMGUI legacy overlay (Shop/Job Board
-        // panel content, Trade, Wormhole, Engagement) is actually
-        // drawing something — used both to gate input-blocking above and
-        // to decide whether OnGUI's BeginArea should paint a background
-        // at all (see OnGUI — GUI.skin.box has its own default dark
-        // translucent fill that would otherwise render as an unexplained
-        // shadow over an empty Rect the rest of the time).
+        // True whenever the still-IMGUI legacy overlay (only Wormhole
+        // travel now — Shop/Job Board/Trade all moved to their own UGUI
+        // screens) is actually drawing something — used both to gate
+        // input-blocking above and to decide whether OnGUI's BeginArea
+        // should paint a background at all (see OnGUI — GUI.skin.box has
+        // its own default dark translucent fill that would otherwise
+        // render as an unexplained shadow over an empty Rect the rest of
+        // the time).
         private bool IsLegacyOverlayActive() =>
-            match.CanAttackOpponent || match.CanTravelWormhole;
+            match.CanTravelWormhole;
 
         private void ConfirmPendingMove()
         {
@@ -299,6 +333,11 @@ namespace StarBound.Demo
         {
             match.RollDice(rng);
             lastMessage = null;
+            // Tucks the stats panel away the moment dice are rolled — the
+            // map is what the player needs to see next (where the roll
+            // can actually take them), same reasoning as the locate
+            // button already living outside the collapsible content.
+            chrome.Collapse();
             RefreshView();
         }
 
@@ -692,6 +731,191 @@ namespace StarBound.Demo
 
         private void OnShopCloseClicked() => showShop = false;
 
+        private void OnHeldItemsToggleClicked() => showHeldItems = !showHeldItems;
+
+        private void OnHeldItemsCloseClicked() => showHeldItems = false;
+
+        // Opens Build mode for CurrentPlayer building the very first
+        // proposal — nothing exists in the domain yet (that only happens
+        // on a successful Send), so this is purely local, same as Shop/
+        // Job Board's own toggle. Reads both ships' current items/money
+        // live; there's no offer to roll ahead of time like Shop/Job
+        // Board have.
+        private void OnTradeToggleClicked()
+        {
+            showTradeBuilder = !showTradeBuilder;
+            if (!showTradeBuilder)
+                return;
+
+            tradeDeviceHolder = match.CurrentPlayer;
+            tradeStatusMessage = null;
+            RefreshTradeBuildFor(match.CurrentPlayer, Array.Empty<ItemDefinition>(), Array.Empty<ItemDefinition>(), 0, 0, "Propose Trade");
+        }
+
+        // Cancel from Build mode — behavior depends on whether a real
+        // negotiation already exists: backing out of the VERY FIRST
+        // proposal just closes the screen (nothing to revert), but
+        // backing out of building a counter returns to reviewing the
+        // terms being countered (the negotiation itself is still active,
+        // only the local "am I editing" state changes) — same device
+        // holder either way, no hand-off needed.
+        private void OnCancelTradeBuildClicked()
+        {
+            showTradeBuilder = false;
+            if (match.IsNegotiatingTrade)
+                RefreshTradeReviewFor(tradeDeviceHolder);
+        }
+
+        // Building player's own "give"/"want" selections need converting
+        // into the domain's fixed Initiator/Opponent-relative terms
+        // before calling ProposeTrade/CounterTrade — flips based on
+        // whether the building player IS the negotiation's Initiator
+        // (match.CurrentPlayer, always, for the whole negotiation's
+        // lifetime) or its Opponent (only ever true while countering).
+        private void OnSendTradeProposalClicked(IReadOnlyList<ItemDefinition> ownGives, IReadOnlyList<ItemDefinition> wantsFromOther, int ownMoney, int wantMoney)
+        {
+            var result = match.ProposeTrade(ownGives, wantsFromOther, ownMoney, wantMoney);
+            if (!result.Success)
+            {
+                tradeNegotiationScreen.SetStatusMessage(Describe(result.FailureReason));
+                return;
+            }
+
+            showTradeBuilder = false;
+            HandOffTradeDeviceTo(match.OtherPlayer, "Review Offer", () => RefreshTradeReviewFor(match.OtherPlayer));
+        }
+
+        private void OnSendTradeCounterClicked(IReadOnlyList<ItemDefinition> ownGives, IReadOnlyList<ItemDefinition> wantsFromOther, int ownMoney, int wantMoney)
+        {
+            var negotiation = match.ActiveTradeNegotiation;
+            // The building player here is always the Opponent (only the
+            // Opponent ever counters) — flip their own gives/wants into
+            // Initiator/Opponent terms the same way OnTradeToggleClicked's
+            // eventual Send does, just from the other side.
+            var result = match.CounterTrade(wantsFromOther, ownGives, wantMoney, ownMoney);
+            if (!result.Success)
+            {
+                tradeNegotiationScreen.SetStatusMessage(Describe(result.FailureReason));
+                return;
+            }
+
+            showTradeBuilder = false;
+            HandOffTradeDeviceTo(negotiation.Initiator, "Review Counter", () => RefreshTradeReviewFor(negotiation.Initiator));
+        }
+
+        // Shared by both review moments (the Opponent reviewing the
+        // original proposal, and the Initiator reviewing the one allowed
+        // counter) — Accept/Reject don't need to know which is which,
+        // only Counter (offered on the review screen itself, hidden once
+        // already countered) cares.
+        private void OnAcceptTradeClicked()
+        {
+            var result = match.AcceptTrade();
+            if (!result.Success)
+            {
+                tradeNegotiationScreen.SetStatusMessage(Describe(result.FailureReason));
+                return;
+            }
+
+            HandOffTradeDeviceTo(match.CurrentPlayer, "Continue Turn", RefreshView);
+        }
+
+        private void OnRejectTradeClicked()
+        {
+            match.RejectTrade();
+            HandOffTradeDeviceTo(match.CurrentPlayer, "Continue Turn", RefreshView);
+        }
+
+        // Switches the SAME device holder (the Opponent, already
+        // reviewing) into Build mode instead of handing off — countering
+        // is still their own moment, not a new hand-off. Pre-fills from
+        // the current terms so countering reads as adjusting the offer,
+        // not starting over.
+        private void OnCounterTradeClicked()
+        {
+            var negotiation = match.ActiveTradeNegotiation;
+            showTradeBuilder = true;
+            RefreshTradeBuildFor(negotiation.Opponent, negotiation.OpponentGives, negotiation.InitiatorGives, negotiation.OpponentMoney, negotiation.InitiatorMoney, "Counter Offer");
+        }
+
+        // Builds Build mode's data from whichever player is actually
+        // building right now (buildingPlayer) — "own" always means
+        // buildingPlayer's own ship, regardless of whether that's the
+        // negotiation's Initiator or Opponent.
+        private void RefreshTradeBuildFor(
+            Player buildingPlayer,
+            IReadOnlyList<ItemDefinition> preselectedOwnGive, IReadOnlyList<ItemDefinition> preselectedWant,
+            int preselectedOwnMoney, int preselectedWantMoney,
+            string headerLabel)
+        {
+            var otherPlayer = buildingPlayer == match.CurrentPlayer ? match.OtherPlayer : match.CurrentPlayer;
+            var onSend = match.IsNegotiatingTrade
+                ? (Action<IReadOnlyList<ItemDefinition>, IReadOnlyList<ItemDefinition>, int, int>)OnSendTradeCounterClicked
+                : OnSendTradeProposalClicked;
+
+            tradeNegotiationScreen.ShowBuild(
+                headerLabel, buildingPlayer.DisplayName, otherPlayer.DisplayName,
+                buildingPlayer.Ship.HeldItems, otherPlayer.Ship.HeldItems,
+                buildingPlayer.Ship.Money, otherPlayer.Ship.Money,
+                preselectedOwnGive, preselectedWant, preselectedOwnMoney, preselectedWantMoney,
+                onSend, OnCancelTradeBuildClicked);
+        }
+
+        // Builds Review mode's data from whichever player is actually
+        // reviewing right now (reviewer) — "they give/want" flips
+        // depending on whether the reviewer is the negotiation's
+        // Initiator or Opponent, since the negotiation's own terms are
+        // always described relative to those fixed roles (see
+        // TradeNegotiation's own comment).
+        private void RefreshTradeReviewFor(Player reviewer)
+        {
+            var negotiation = match.ActiveTradeNegotiation;
+            var reviewerIsOpponent = reviewer == negotiation.Opponent;
+            var theyGive = reviewerIsOpponent ? negotiation.InitiatorGives : negotiation.OpponentGives;
+            var theyWant = reviewerIsOpponent ? negotiation.OpponentGives : negotiation.InitiatorGives;
+            var theyGiveMoney = reviewerIsOpponent ? negotiation.InitiatorMoney : negotiation.OpponentMoney;
+            var theyWantMoney = reviewerIsOpponent ? negotiation.OpponentMoney : negotiation.InitiatorMoney;
+            var proposer = reviewerIsOpponent ? negotiation.Initiator : negotiation.Opponent;
+            var headerLabel = negotiation.HasBeenCountered && !reviewerIsOpponent
+                ? $"Counter from {proposer.DisplayName}"
+                : $"Offer from {proposer.DisplayName}";
+
+            tradeStatusMessage = null;
+            tradeNegotiationScreen.ShowReview(
+                headerLabel, theyGive, theyWant, theyGiveMoney, theyWantMoney,
+                canCounter: reviewerIsOpponent && !negotiation.HasBeenCountered,
+                OnAcceptTradeClicked, OnRejectTradeClicked, OnCounterTradeClicked);
+        }
+
+        private static string Describe(TradeProposalFailureReason reason) => reason switch
+        {
+            TradeProposalFailureReason.ItemNotHeld => "an item in this offer is no longer held",
+            TradeProposalFailureReason.InsufficientFunds => "not enough money",
+            TradeProposalFailureReason.CargoFull => "not enough cargo room",
+            _ => reason.ToString()
+        };
+
+        // Parallel, Player-typed version of HandOffDeviceTo — see
+        // tradeDeviceHolder's own comment for why this isn't a literal
+        // reuse of that method.
+        private void HandOffTradeDeviceTo(Player holder, string readyLabel, Action onReady)
+        {
+            if (tradeDeviceHolder == holder)
+            {
+                onReady();
+                return;
+            }
+
+            awaitingTradeHandoff = true;
+            handoffScreen.Show(holder, () =>
+            {
+                awaitingTradeHandoff = false;
+                handoffScreen.Hide();
+                tradeDeviceHolder = holder;
+                onReady();
+            }, readyLabel);
+        }
+
         private void RefreshShopScreen()
         {
             var ship = match.CurrentPlayer.Ship;
@@ -877,6 +1101,8 @@ namespace StarBound.Demo
             pendingTarget = null;
             showShop = false;
             showJobBoard = false;
+            showHeldItems = false;
+            showTradeBuilder = false;
             jobOfferRolledThisTurn = false;
             lastMessage = null;
             RefreshView();
@@ -897,7 +1123,8 @@ namespace StarBound.Demo
             if (chrome == null || match == null)
                 return;
 
-            var chromeVisible = !awaitingHandoff && !match.IsComplete && !match.IsInEngagement && !showShop && !showJobBoard;
+            var chromeVisible = !awaitingHandoff && !match.IsComplete && !match.IsInEngagement && !showShop && !showJobBoard &&
+                !showTradeBuilder && !match.IsNegotiatingTrade;
             chrome.SetVisible(chromeVisible);
 
             // Same "explicit state-change call sites" discipline chrome's
@@ -982,6 +1209,53 @@ namespace StarBound.Demo
             }
             wasJobBoardVisible = jobBoardVisible;
 
+            // Unlike Shop/Job Board, there's no planet/turn-phase gate to
+            // self-correct against — held items are always viewable. Just
+            // a rising-edge Show() (not a per-frame one — see
+            // EngagementScreen's own comment on why rebuilding Button
+            // GameObjects every frame is unsafe) since nothing else can
+            // change HeldItems while this popup is the only thing open.
+            var heldItemsVisible = !awaitingHandoff && !match.IsComplete && showHeldItems;
+            heldItemsPopup.SetVisible(heldItemsVisible);
+            if (heldItemsVisible && !wasHeldItemsVisible)
+            {
+                var ship = match.CurrentPlayer.Ship;
+                heldItemsPopup.Show(ship.HeldItems, ship.CargoCapacity, OnHeldItemsCloseClicked);
+            }
+            wasHeldItemsVisible = heldItemsVisible;
+
+            // Same self-correcting, UI-only-toggle reasoning as Shop above
+            // — but only for the PRE-negotiation build phase (nothing
+            // proposed yet). Once a real negotiation exists
+            // (match.IsNegotiatingTrade), CanProposeTrade is inherently
+            // false (it explicitly excludes IsNegotiatingTrade — see
+            // Match.cs), so using it as a self-correction condition here
+            // too would immediately snap a counter-in-progress closed the
+            // moment it opens. A negotiation already in progress is only
+            // interrupted by the match ending or (defensively) an
+            // engagement starting, both covered by the outer
+            // tradeNegotiationVisible expression below.
+            if (showTradeBuilder && !match.IsNegotiatingTrade && !match.CanProposeTrade)
+                showTradeBuilder = false;
+
+            // trackedTradeNegotiation mirrors trackedEngagementSession —
+            // resets tradeDeviceHolder to the Initiator the moment a
+            // genuinely NEW negotiation starts (as opposed to merely
+            // returning from a HandOffTradeDeviceTo hand-off screen, which
+            // also touches this state but shouldn't reset it — see that
+            // field's own comment).
+            var activeNegotiation = match.ActiveTradeNegotiation;
+            if (activeNegotiation != trackedTradeNegotiation)
+            {
+                trackedTradeNegotiation = activeNegotiation;
+                if (activeNegotiation != null)
+                    tradeDeviceHolder = activeNegotiation.Initiator;
+            }
+
+            var tradeNegotiationVisible = !awaitingHandoff && !match.IsComplete && !awaitingTradeHandoff &&
+                (showTradeBuilder || match.IsNegotiatingTrade);
+            tradeNegotiationScreen.SetVisible(tradeNegotiationVisible);
+
             // The map camera's own viewport shrinks to leave room for
             // whichever bottom-docked UI is actually showing — the dice
             // bar under chrome, or JobBoardScreen's own bottom-anchored
@@ -1004,7 +1278,7 @@ namespace StarBound.Demo
 
             var player = match.CurrentPlayer;
             var playerColor = player == match.PlayerOne ? PlayerOneColor : PlayerTwoColor;
-            chrome.SetHeader($"Turn: {player.DisplayName}", playerColor);
+            chrome.SetHeader(player.DisplayName, playerColor);
 
             chrome.SetStats(player.Ship);
 
@@ -1031,6 +1305,10 @@ namespace StarBound.Demo
             // self-correction in the visibility block above).
             var canVisitJobBoardHere = match.IsCurrentPlayerOnPlanet && match.CanAcceptJob && match.CurrentPlayer.ActiveJob == null;
             chrome.SetJobBoard(canVisitJobBoardHere, showJobBoard ? "Close Job Board" : "Open Job Board");
+
+            // Same base gate as Attack (IsOnOpponentHex + budget) — see
+            // Match.CanAttackOpponent/CanProposeTrade.
+            chrome.SetTrade(match.CanAttackOpponent, showTradeBuilder ? "Close Trade" : "Open Trade");
 
             if (match.CurrentPlayer.ActiveJob is { } activeJob)
             {
@@ -1088,6 +1366,17 @@ namespace StarBound.Demo
                 return;
             if (showJobBoard)
                 return;
+            // HeldItemsPopup is UGUI too — without this, a leftover
+            // Wormhole IMGUI panel (drawn below, independent of
+            // showShop/showJobBoard) would render on top of the popup and
+            // could steal taps meant for its Close button.
+            if (showHeldItems)
+                return;
+            // Trade has its own full-screen UGUI negotiation screen now
+            // too (see RefreshTradeBuildFor/RefreshTradeReviewFor) — same
+            // reasoning as Shop/Job Board above.
+            if (showTradeBuilder || match.IsNegotiatingTrade)
+                return;
 
             // IMGUI has no CanvasScaler equivalent — GUI.skin's default
             // font size is tuned for desktop pixel density and doesn't
@@ -1095,9 +1384,9 @@ namespace StarBound.Demo
             // renders illegibly tiny on a phone (the same physical-vs-
             // logical scale problem the UGUI chrome had, just never
             // fixed here since this whole region is scheduled to be
-            // replaced by dedicated UGUI screens soon — Trade/Wormhole,
-            // Order #11-12). This is a deliberately rough interim bump,
-            // not a real fix.
+            // replaced by a dedicated UGUI screen soon — Wormhole, Order
+            // #13, the last remaining legacy IMGUI panel). This is a
+            // deliberately rough interim bump, not a real fix.
             if (!legacySkinScaled)
             {
                 GUI.skin.label.fontSize = 34;
@@ -1117,26 +1406,18 @@ namespace StarBound.Demo
             GUILayout.EndArea();
         }
 
-        // Shop and Job Board's own content now live entirely in
-        // ShopScreen/JobBoardScreen (see RefreshShopScreen/
-        // RefreshJobBoardScreen and OnGUI's own showShop/showJobBoard
-        // guards above) — active job tracking moved to a persistent
-        // MatchHudChrome strip (see SetActiveJob). Only Wormhole/Trade
-        // are still legacy IMGUI here, each with its own pending redesign
-        // story.
+        // Shop, Job Board, and Trade's own content now live entirely in
+        // ShopScreen/JobBoardScreen/TradeNegotiationScreen (see
+        // RefreshShopScreen/RefreshJobBoardScreen/RefreshTradeBuildFor/
+        // RefreshTradeReviewFor and OnGUI's own showShop/showJobBoard/
+        // showTradeBuilder guards above) — active job tracking moved to a
+        // persistent MatchHudChrome strip (see SetActiveJob). Only
+        // Wormhole is still legacy IMGUI here, with its own pending
+        // redesign story (Order #13).
         private void DrawMainPanel()
         {
             if (match.CanTravelWormhole)
                 DrawWormholeTravelPanel();
-
-            GUILayout.Space(10);
-
-            if (match.CanAttackOpponent)
-            {
-                GUILayout.Label($"{match.OtherPlayer.DisplayName} is here.");
-                DrawTradePanel();
-                GUILayout.Space(10);
-            }
         }
 
         // Still used by DescribeVariable/DescribeGoal's callers — see
@@ -1157,49 +1438,6 @@ namespace StarBound.Demo
                 $"Defeat the marked target at ({goal.TargetHex.Q}, {goal.TargetHex.R}) (reward ${goal.RewardMoney}).",
             _ => goal.Type.ToString()
         };
-
-        // Standing trade offer while sharing a hex with the opponent —
-        // deliberately independent of the Shop/planet gating
-        // (CanTradeWithOpponent doesn't require being on a planet, so
-        // this can't live inside ShopScreen or it'd be unreachable
-        // off-planet). Note: this is a different Trade than the per-item
-        // Trade action on a Cargo item's ShopScreen detail card — that
-        // one only offers items already IN the shop's own Cargo list.
-        private void DrawTradePanel()
-        {
-            var heldItems = match.CurrentPlayer.Ship.HeldItems.ToList();
-
-            GUILayout.Space(5);
-            GUILayout.Label("-- Trade --");
-
-            if (heldItems.Count == 0)
-            {
-                // Trade only offers what the mover is carrying — it's not a
-                // request-from-opponent flow — so this is expected, not an
-                // error, whenever the mover hasn't bought anything yet.
-                GUILayout.Label($"You have nothing to trade {match.OtherPlayer.DisplayName}. Buy something from a shop first.");
-                return;
-            }
-
-            foreach (var item in heldItems)
-            {
-                if (match.CanTradeWithOpponent(item))
-                {
-                    if (GUILayout.Button($"Trade {item.Name} to {match.OtherPlayer.DisplayName} — ${item.Price / 2}"))
-                    {
-                        match.TradeItemToOpponent(item);
-                        lastMessage = $"Traded {item.Name} to {match.OtherPlayer.DisplayName}.";
-                    }
-                }
-                else
-                {
-                    var reason = !match.OtherPlayer.Ship.CanHoldAnotherItem
-                        ? $"{match.OtherPlayer.DisplayName}'s cargo is full"
-                        : $"{match.OtherPlayer.DisplayName} can't afford ${item.Price / 2}";
-                    GUILayout.Label($"{item.Name} — can't trade: {reason}");
-                }
-            }
-        }
 
         // Standing movement option for anyone holding the Wormhole Device
         // (see Match.CanTravelWormhole) — available any time during the
@@ -1404,6 +1642,7 @@ namespace StarBound.Demo
                 match.CurrentHand?.Dice ?? Array.Empty<RolledDie>(),
                 selectedDie,
                 match.CurrentHand != null,
+                match.CanRollDice,
                 match.CanMove,
                 pendingTarget.HasValue ? "Confirm this move?" : null,
                 OnRollDiceClicked,

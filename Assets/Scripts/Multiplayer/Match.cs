@@ -42,8 +42,22 @@ namespace StarBound.Multiplayer
 
         private DiceHand currentHand;
         private EngagementSession activeEngagement;
+        private TradeNegotiation activeTradeNegotiation;
         private int actionsUsed;
         private ActionSession openSession = ActionSession.None;
+        // The Move action can now be paid up front by RollDice, before any
+        // actual move happens — moveSessionPaid tracks that payment
+        // independent of openSession, since a later, different session
+        // (e.g. shopping) overwrites openSession without un-paying it.
+        // hasMovedThisTurn distinguishes "paid but not yet used" from
+        // "already used": a still-unused roll survives being interrupted
+        // by something else (rolling was the commitment — see RollDice),
+        // but once movement has actually happened, a later, different
+        // session closes it back out for the rest of the turn, same as it
+        // always has (see BuyItem_AfterMoving_ClosesTheMoveSessionEvenWith-
+        // NoActionsSpentOnItAgain) — see ConsumeActionForSession.
+        private bool moveSessionPaid;
+        private bool hasMovedThisTurn;
         private int successfulEngagementsSinceLastEvent;
 
         public GameMap Map { get; }
@@ -100,14 +114,26 @@ namespace StarBound.Multiplayer
         public bool IsInEngagement => activeEngagement != null;
         public bool IsComplete => Winner != null;
 
-        // Free to keep spending dice while the Move session is still open
-        // (nothing else has happened since); otherwise needs a fresh
-        // action, and once a DIFFERENT session has opened (e.g. shopping),
-        // Move can't resume even with actions left over (see
-        // ConsumeActionForSession).
+        public TradeNegotiation ActiveTradeNegotiation => activeTradeNegotiation;
+
+        // True from ProposeTrade until the negotiation is resolved via
+        // AcceptTrade/RejectTrade — blocks everything else the same way
+        // IsInEngagement does (see the sweep across CanMove/CanShop/etc.
+        // below), since it's a modal, device-hand-off-driven exchange with
+        // the opponent, not something that can happen alongside normal
+        // play.
+        public bool IsNegotiatingTrade => activeTradeNegotiation != null;
+
+        // Free to move once the Move action is paid for — via RollDice, an
+        // earlier Move, or a wormhole jump this turn, whichever came first
+        // (see moveSessionPaid) — regardless of what else has happened
+        // since; otherwise needs a fresh action. Rolling is the actual
+        // commitment now (see RollDice's own comment): once you've rolled,
+        // using the dice never costs anything more or gets blocked by
+        // doing something else first.
         public bool CanMove =>
-            !IsInEngagement && !IsComplete && currentHand != null &&
-            (openSession == ActionSession.Move || actionsUsed < ActionsPerTurn);
+            !IsInEngagement && !IsComplete && !IsNegotiatingTrade && currentHand != null &&
+            (moveSessionPaid || actionsUsed < ActionsPerTurn);
 
         // Not gated on having rolled dice — a player who doesn't intend to
         // move at all this turn shouldn't be forced to roll movement dice
@@ -116,13 +142,13 @@ namespace StarBound.Multiplayer
         // market visit (Shop, Deliver, Repair) — same session-based
         // reasoning as CanMove. Job Board is separate — see CanAcceptJob.
         public bool CanShop =>
-            !IsInEngagement && !IsComplete &&
+            !IsInEngagement && !IsComplete && !IsNegotiatingTrade &&
             (openSession == ActionSession.Market || actionsUsed < ActionsPerTurn);
 
         // A standalone one-shot action, not bundled with the Shop session —
         // buying something and accepting a job are two separate actions.
         public bool CanAcceptJob =>
-            !IsInEngagement && !IsComplete && actionsUsed < ActionsPerTurn;
+            !IsInEngagement && !IsComplete && !IsNegotiatingTrade && actionsUsed < ActionsPerTurn;
 
         public bool IsCurrentPlayerOnPlanet =>
             Map.TryGetHex(CurrentPlayer.Position, out var hex) && hex.Terrain == TerrainType.PlanetOrStarport;
@@ -136,7 +162,7 @@ namespace StarBound.Multiplayer
         public bool IsOnOpponentHex => CurrentPlayer.Position == OtherPlayer.Position;
 
         public bool CanAttackOpponent =>
-            IsOnOpponentHex && !IsInEngagement && !IsComplete && actionsUsed < ActionsPerTurn;
+            IsOnOpponentHex && !IsInEngagement && !IsComplete && !IsNegotiatingTrade && actionsUsed < ActionsPerTurn;
 
         // Deliberately NOT gated by !IsInEngagement or the action budget —
         // using a consumable (e.g. a repair kit) mid-fight is the whole
@@ -146,16 +172,25 @@ namespace StarBound.Multiplayer
             !IsComplete && item.Kind == ItemKind.Consumable && CurrentPlayer.Ship.HeldItems.Contains(item);
 
         public bool CanTradeWithOpponent(ItemDefinition item) =>
-            IsOnOpponentHex && !IsInEngagement && !IsComplete && actionsUsed < ActionsPerTurn &&
+            IsOnOpponentHex && !IsInEngagement && !IsComplete && !IsNegotiatingTrade && actionsUsed < ActionsPerTurn &&
             CurrentPlayer.Ship.HeldItems.Contains(item) && OtherPlayer.Ship.CanHoldAnotherItem &&
             OtherPlayer.Ship.Money >= item.Price / 2;
+
+        // Same base gate CanAttackOpponent/CanTradeWithOpponent already
+        // share — a negotiation is just a bigger version of the same
+        // standing "sharing a hex" opportunity. Same shape as
+        // CanTradeWithOpponent but without a specific item — the actual
+        // terms are validated at ProposeTrade time instead, since a
+        // proposal isn't about one fixed item.
+        public bool CanProposeTrade =>
+            IsOnOpponentHex && !IsInEngagement && !IsComplete && !IsNegotiatingTrade && actionsUsed < ActionsPerTurn;
 
         // Mining is two steps: mine at any Asteroids field first, then
         // deliver — a delivery isn't possible until the cargo's mined. Not
         // gated on having rolled dice, same reasoning as CanShop — mining
         // doesn't spend a die, so there's no need to force a roll first.
         public bool CanMineAsteroid =>
-            !IsInEngagement && !IsComplete && actionsUsed < ActionsPerTurn &&
+            !IsInEngagement && !IsComplete && !IsNegotiatingTrade && actionsUsed < ActionsPerTurn &&
             CurrentPlayer.ActiveJob is { Type: JobType.Mining } && !CurrentPlayer.HasMinedCargo &&
             Map.TryGetHex(CurrentPlayer.Position, out var hex) && hex.Terrain == TerrainType.Asteroids;
 
@@ -174,13 +209,21 @@ namespace StarBound.Multiplayer
         // separate action category — free to chain with dice-based moves
         // in either order within one continuous session.
         public bool CanTravelWormhole =>
-            !IsInEngagement && !IsComplete &&
-            (openSession == ActionSession.Move || actionsUsed < ActionsPerTurn) &&
+            !IsInEngagement && !IsComplete && !IsNegotiatingTrade &&
+            (moveSessionPaid || actionsUsed < ActionsPerTurn) &&
             CurrentPlayer.Ship.HeldItems.Contains(ItemPool.WormholeDevice);
 
         public IEnumerable<HexCoordinate> OtherWormholeDestinations =>
             Map.Hexes.Where(h => h.Terrain == TerrainType.Wormhole && h.Coordinate != CurrentPlayer.Position)
                 .Select(h => h.Coordinate);
+
+        // Gated on the action budget — rolling is now what actually opens
+        // (and pays for) the Move session, not the first successful move
+        // (see RollDice). A 0-budget roll would just hand the player a
+        // dice hand CanMove can never legally spend, so it's blocked here
+        // rather than silently producing a useless roll.
+        public bool CanRollDice =>
+            !IsInEngagement && !IsComplete && !IsNegotiatingTrade && currentHand == null && actionsUsed < ActionsPerTurn;
 
         public DiceHand RollDice(Random rng)
         {
@@ -189,8 +232,22 @@ namespace StarBound.Multiplayer
                 throw new InvalidOperationException("Can't roll movement dice mid-engagement.");
             if (currentHand != null)
                 throw new InvalidOperationException("Dice have already been rolled this turn.");
+            if (actionsUsed >= ActionsPerTurn)
+                throw new InvalidOperationException("No actions remaining to roll dice with.");
 
             currentHand = DiceRoller.Roll(rng);
+            // Rolling itself now spends the Move session's action —
+            // previously only an actual move did (see Move's own
+            // ConsumeActionForSession call below), which let a player roll
+            // "for free" just to see the dice and, if they didn't like the
+            // result, do something else instead without it ever costing
+            // them anything. Sharing Move's session means a move made with
+            // this hand afterward doesn't pay a second time (see
+            // ConsumeActionForSession's same-session guard) — rolling and
+            // the move it enables are still just one action together,
+            // exactly as before, just charged at roll time instead of at
+            // the first successful move.
+            ConsumeActionForSession(ActionSession.Move);
             return currentHand;
         }
 
@@ -211,6 +268,7 @@ namespace StarBound.Multiplayer
                 return result;
 
             CurrentPlayer.Position = result.NewPosition;
+            hasMovedThisTurn = true; // see moveSessionPaid's own comment
             ConsumeActionForSession(ActionSession.Move);
             HandleArrival(result.NewPosition, rng);
 
@@ -231,6 +289,7 @@ namespace StarBound.Multiplayer
                 throw new InvalidOperationException("That's not a valid wormhole destination.");
 
             CurrentPlayer.Position = destination;
+            hasMovedThisTurn = true; // see moveSessionPaid's own comment
             ConsumeActionForSession(ActionSession.Move);
             HandleArrival(destination, rng);
         }
@@ -361,10 +420,14 @@ namespace StarBound.Multiplayer
         }
 
         // The receiving player pays half the item's price — same rate as
-        // selling it to the market, just to a player instead. No
-        // negotiation UI; this is a flat, always-available offer. A
-        // simple one-shot action — a second trade the same turn spends
-        // the other action slot too.
+        // selling it to the market, just to a player instead. A flat,
+        // always-available, single-item offer with no opponent agency —
+        // this is specifically ShopScreen's own per-item "Trade" action on
+        // a held Cargo item's detail card (see OnShopTradeItemClicked),
+        // NOT the standalone Trade screen, which is a real multi-item/
+        // money negotiation instead (see ProposeTrade below). A simple
+        // one-shot action — a second trade the same turn spends the other
+        // action slot too.
         public void TradeItemToOpponent(ItemDefinition item)
         {
             EnsureMatchInProgress();
@@ -377,6 +440,144 @@ namespace StarBound.Multiplayer
             OtherPlayer.Ship.TryAddItem(item);
             CurrentPlayer.Ship.AddMoney(price);
             ConsumeAction();
+        }
+
+        // Opens a negotiation — CurrentPlayer becomes the negotiation's
+        // fixed Initiator (see TradeNegotiation) for its whole lifetime,
+        // even though control (via MatchHud's own device hand-off, mirror
+        // of the mid-fight PvP one) passes to the Opponent to respond and
+        // possibly back again. Costs the one action up front, regardless
+        // of how the negotiation is ultimately resolved (accepted,
+        // rejected, or countered-then-resolved) — same "the commitment is
+        // the trigger, not the outcome" reasoning RollDice already
+        // established this session.
+        public TradeProposalResult ProposeTrade(
+            IReadOnlyList<ItemDefinition> initiatorGives, IReadOnlyList<ItemDefinition> opponentGives,
+            int initiatorMoney, int opponentMoney)
+        {
+            EnsureMatchInProgress();
+            if (!CanProposeTrade)
+                throw new InvalidOperationException("Can't propose a trade right now.");
+
+            var validation = ValidateProposalTerms(CurrentPlayer, OtherPlayer, initiatorGives, opponentGives, initiatorMoney, opponentMoney);
+            if (!validation.Success)
+                return validation;
+
+            activeTradeNegotiation = new TradeNegotiation(CurrentPlayer, OtherPlayer, initiatorGives, opponentGives, initiatorMoney, opponentMoney);
+            ConsumeAction();
+            return TradeProposalResult.Succeeded();
+        }
+
+        // The Opponent's one allowed reply to the Initiator's terms —
+        // replaces them wholesale rather than layering on top (see
+        // TradeNegotiation.ApplyCounter). No action cost: the Initiator
+        // already paid at ProposeTrade time, and countering isn't the
+        // Opponent's own match turn to begin with.
+        public TradeProposalResult CounterTrade(
+            IReadOnlyList<ItemDefinition> initiatorGives, IReadOnlyList<ItemDefinition> opponentGives,
+            int initiatorMoney, int opponentMoney)
+        {
+            EnsureMatchInProgress();
+            if (activeTradeNegotiation == null)
+                throw new InvalidOperationException("There's no trade proposal to counter.");
+            if (activeTradeNegotiation.HasBeenCountered)
+                throw new InvalidOperationException("Only one counter-offer is allowed.");
+
+            var validation = ValidateProposalTerms(
+                activeTradeNegotiation.Initiator, activeTradeNegotiation.Opponent,
+                initiatorGives, opponentGives, initiatorMoney, opponentMoney);
+            if (!validation.Success)
+                return validation;
+
+            activeTradeNegotiation.ApplyCounter(initiatorGives, opponentGives, initiatorMoney, opponentMoney);
+            return TradeProposalResult.Succeeded();
+        }
+
+        // Commits the negotiation's CURRENT terms (the original proposal,
+        // or the one counter if there was one) atomically. Re-validates
+        // first even though nothing else can legally change either ship's
+        // held items/money while a negotiation is active (it's modal —
+        // see IsNegotiatingTrade) — cheap insurance against exactly that
+        // assumption ever quietly becoming false later.
+        public TradeProposalResult AcceptTrade()
+        {
+            EnsureMatchInProgress();
+            if (activeTradeNegotiation == null)
+                throw new InvalidOperationException("There's no trade proposal to accept.");
+
+            var negotiation = activeTradeNegotiation;
+            var validation = ValidateProposalTerms(
+                negotiation.Initiator, negotiation.Opponent,
+                negotiation.InitiatorGives, negotiation.OpponentGives, negotiation.InitiatorMoney, negotiation.OpponentMoney);
+            if (!validation.Success)
+                return validation;
+
+            foreach (var item in negotiation.InitiatorGives)
+            {
+                negotiation.Initiator.Ship.TryRemoveItem(item);
+                negotiation.Opponent.Ship.TryAddItem(item);
+            }
+            foreach (var item in negotiation.OpponentGives)
+            {
+                negotiation.Opponent.Ship.TryRemoveItem(item);
+                negotiation.Initiator.Ship.TryAddItem(item);
+            }
+            if (negotiation.InitiatorMoney > 0)
+            {
+                negotiation.Initiator.Ship.TrySpendMoney(negotiation.InitiatorMoney);
+                negotiation.Opponent.Ship.AddMoney(negotiation.InitiatorMoney);
+            }
+            if (negotiation.OpponentMoney > 0)
+            {
+                negotiation.Opponent.Ship.TrySpendMoney(negotiation.OpponentMoney);
+                negotiation.Initiator.Ship.AddMoney(negotiation.OpponentMoney);
+            }
+
+            activeTradeNegotiation = null;
+            return TradeProposalResult.Succeeded();
+        }
+
+        // Ends the negotiation with no transfers — the Initiator's action
+        // spent at ProposeTrade time isn't refunded (same "the commitment
+        // is the trigger" reasoning as ProposeTrade's own comment).
+        public void RejectTrade()
+        {
+            EnsureMatchInProgress();
+            if (activeTradeNegotiation == null)
+                throw new InvalidOperationException("There's no trade proposal to reject.");
+
+            activeTradeNegotiation = null;
+        }
+
+        // Shared by ProposeTrade/CounterTrade/AcceptTrade — checked
+        // against whichever pair of ships the terms are actually relative
+        // to (always Initiator/Opponent, never CurrentPlayer/OtherPlayer
+        // directly, since the Opponent is the one proposing when
+        // countering). Cargo capacity is checked properly (net items
+        // gained vs. lost), not via Ship.CanHoldAnotherItem's single-item
+        // shortcut, since a proposal can move several items each way at
+        // once.
+        private static TradeProposalResult ValidateProposalTerms(
+            Player initiator, Player opponent,
+            IReadOnlyList<ItemDefinition> initiatorGives, IReadOnlyList<ItemDefinition> opponentGives,
+            int initiatorMoney, int opponentMoney)
+        {
+            foreach (var item in initiatorGives)
+                if (!initiator.Ship.HeldItems.Contains(item))
+                    return TradeProposalResult.Failed(TradeProposalFailureReason.ItemNotHeld);
+            foreach (var item in opponentGives)
+                if (!opponent.Ship.HeldItems.Contains(item))
+                    return TradeProposalResult.Failed(TradeProposalFailureReason.ItemNotHeld);
+
+            if (initiator.Ship.Money < initiatorMoney || opponent.Ship.Money < opponentMoney)
+                return TradeProposalResult.Failed(TradeProposalFailureReason.InsufficientFunds);
+
+            var initiatorItemCountAfter = initiator.Ship.HeldItems.Count - initiatorGives.Count + opponentGives.Count;
+            var opponentItemCountAfter = opponent.Ship.HeldItems.Count - opponentGives.Count + initiatorGives.Count;
+            if (initiatorItemCountAfter > initiator.Ship.CargoCapacity || opponentItemCountAfter > opponent.Ship.CargoCapacity)
+                return TradeProposalResult.Failed(TradeProposalFailureReason.CargoFull);
+
+            return TradeProposalResult.Succeeded();
         }
 
         // Mining the cargo is a simple one-shot action — it doesn't pay
@@ -541,17 +742,21 @@ namespace StarBound.Multiplayer
             activeEngagement = null;
         }
 
-        public bool CanEndTurn => !IsInEngagement && !IsComplete;
+        public bool CanEndTurn => !IsInEngagement && !IsComplete && !IsNegotiatingTrade;
 
         public void EndTurn()
         {
             EnsureMatchInProgress();
             if (IsInEngagement)
                 throw new InvalidOperationException("Can't end turn mid-encounter.");
+            if (IsNegotiatingTrade)
+                throw new InvalidOperationException("Can't end turn mid-negotiation.");
 
             currentHand = null; // unspent dice are discarded, no carryover
             actionsUsed = 0;
             openSession = ActionSession.None;
+            moveSessionPaid = false;
+            hasMovedThisTurn = false;
             CurrentPlayer = CurrentPlayer == PlayerOne ? PlayerTwo : PlayerOne;
             TurnNumber++;
         }
@@ -574,35 +779,62 @@ namespace StarBound.Multiplayer
 
         // For the simple one-shot actions (Mine, Trade, Job Board) — always
         // spends a fresh action and closes out any open Move/Market
-        // session, since doing something else ends it.
+        // session, since doing something else ends it. Also closes out an
+        // already-*used* (not just paid) Move privilege — see
+        // ConsumeActionForSession's own comment on the distinction.
         private void ConsumeAction()
         {
             if (actionsUsed < ActionsPerTurn)
                 actionsUsed++;
             openSession = ActionSession.None;
+            if (hasMovedThisTurn)
+                moveSessionPaid = false;
         }
 
         // For the two "session" categories (Move, Market) — free to
         // continue if this same session is already open; otherwise spends
         // a fresh action and opens it, implicitly closing whatever
         // session (if any) was open before. See CanMove/CanShop.
+        //
+        // Move is the one exception to "implicitly closes the previous
+        // session" — but only while it's still an unspent voucher. Once
+        // paid (by RollDice, an actual Move, or a wormhole jump —
+        // whichever happens first this turn) and NOT yet actually used,
+        // switching to a different session doesn't un-pay it: rolling was
+        // the commitment (see RollDice), so a shop visit before you've
+        // moved at all shouldn't cost you the move you already paid for.
+        // But once you've actually moved and THEN switch sessions, the
+        // Move privilege closes for the rest of the turn exactly as it
+        // always has — see BuyItem_AfterMoving_ClosesTheMoveSessionEvenWith-
+        // NoActionsSpentOnItAgain, and hasMovedThisTurn's own comment.
         private void ConsumeActionForSession(ActionSession session)
         {
+            if (session == ActionSession.Move && moveSessionPaid)
+                return;
             if (openSession == session)
                 return;
+
+            if (session != ActionSession.Move && hasMovedThisTurn)
+                moveSessionPaid = false;
 
             if (actionsUsed < ActionsPerTurn)
                 actionsUsed++;
             openSession = session;
+            if (session == ActionSession.Move)
+                moveSessionPaid = true;
         }
 
         // For engagements (see AttackOpponent/HandleArrival) — spends
         // whatever's left of the budget outright and closes any open
-        // session, regardless of how much had already been spent.
+        // session, regardless of how much had already been spent. Also
+        // closes out an unspent Move voucher — engaging in combat is a
+        // bigger interruption than an ordinary market visit, so a roll
+        // that hasn't been used yet doesn't survive it either.
         private void ExhaustActions()
         {
             actionsUsed = ActionsPerTurn;
             openSession = ActionSession.None;
+            moveSessionPaid = false;
         }
 
         private void EnsureMatchInProgress()

@@ -180,8 +180,11 @@ namespace StarBound.Tests
 
             Assert.AreEqual(0, p1.EasyEngagementWins);
             Assert.IsFalse(p1.HasWonMatch);
-            Assert.AreEqual(0, p2.Ship.GetStat(CoreStat.Hull));
-            Assert.AreEqual(0, p2.Ship.Money); // zero-Hull penalty wiped them out
+            // Zero-Hull penalty wiped them out — money's gone, and Hull is
+            // reset back to the default (not left stuck at 0, see
+            // Ship.ResetIntegrityStats) so they can actually keep playing.
+            Assert.AreEqual(Ship.DefaultStatValue, p2.Ship.GetStat(CoreStat.Hull));
+            Assert.AreEqual(0, p2.Ship.Money);
         }
 
         [Test]
@@ -285,11 +288,15 @@ namespace StarBound.Tests
             var item = ItemPool.Items.First(i => i.Kind == ItemKind.Permanent && i.AffectedStat == CoreStat.Weapons);
 
             // Turn 1: "take a job or buy something from the shop, and then move."
-            match.RollDice(new Random(1));
+            // Rolled right before the move, not at the top — rolling now
+            // spends the Move session's own action (see Match.RollDice),
+            // so rolling before the shop visit would make the shop the one
+            // that runs out of budget instead of leaving room for both.
             var purchase = match.BuyItem(item);
             Assert.IsTrue(purchase.Success);
             Assert.AreEqual(1, match.ActionsRemaining);
 
+            match.RollDice(new Random(1));
             var move = match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
             Assert.IsTrue(move.Success);
             Assert.AreEqual(0, match.ActionsRemaining);
@@ -335,7 +342,10 @@ namespace StarBound.Tests
 
             // Turn 1: buy at home, then travel the whole way to p2's planet
             // in one Move session (buying already used the market action,
-            // so the 3-hex chain here is the turn's other action).
+            // so the 3-hex chain here is the turn's other action) — rolling
+            // before or after the purchase both work equally, since Move
+            // stays available once paid for regardless of what else
+            // happens in between (see Match.CanMove).
             match.RollDice(new Random(1));
             match.BuyItem(item);
             match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(1));
@@ -367,8 +377,10 @@ namespace StarBound.Tests
             p1.Ship.AddMoney(100);
 
             // Turn 1 (p1): shop only, deliberately leaving an action spare.
+            // Not rolling — shopping doesn't need a hand, and rolling now
+            // spends an action of its own (see Match.RollDice), which
+            // would leave nothing spare to assert below.
             Assert.AreEqual(p1, match.CurrentPlayer);
-            match.RollDice(new Random(1));
             var item = ItemPool.Items.First(i => i.Kind == ItemKind.Permanent && i.AffectedStat == CoreStat.Shields);
             match.BuyItem(item);
             Assert.AreEqual(1, match.ActionsRemaining);
