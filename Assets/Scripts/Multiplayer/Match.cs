@@ -514,7 +514,14 @@ namespace StarBound.Multiplayer
             }
             else if (activeEngagement.Outcome == EngagementOutcome.PlayerEscaped)
             {
-                RelocateAfterEscape(rng);
+                RelocateAfterEscape(CurrentPlayer, rng);
+            }
+            else if (activeEngagement.Outcome == EngagementOutcome.OpponentEscaped)
+            {
+                // PvP-only (see EngagementOutcome) — the OTHER player fled,
+                // so they're the one who gets relocated, same treatment
+                // CurrentPlayer gets above for their own escape.
+                RelocateAfterEscape(OtherPlayer, rng);
             }
 
             // Skipped for PvP: a bounty job targets a specific marked NPC
@@ -552,15 +559,17 @@ namespace StarBound.Multiplayer
         // Picks a random neighboring hex with no engagement marker of its
         // own — landing straight back into another ambush would defeat the
         // point of escaping. Leaves the player in place if every neighbor
-        // is either off the map or itself marked (e.g. boxed in).
-        private void RelocateAfterEscape(Random rng)
+        // is either off the map or itself marked (e.g. boxed in). Takes
+        // whichever Player actually escaped — CurrentPlayer for their own
+        // PlayerEscaped, OtherPlayer for a PvP OpponentEscaped.
+        private void RelocateAfterEscape(Player player, Random rng)
         {
-            var candidates = Map.GetNeighborCoordinates(CurrentPlayer.Position)
+            var candidates = Map.GetNeighborCoordinates(player.Position)
                 .Where(coordinate => Map.TryGetHex(coordinate, out var hex) && !hex.HasEngagement)
                 .ToList();
 
             if (candidates.Count > 0)
-                CurrentPlayer.Position = candidates[rng.Next(candidates.Count)];
+                player.Position = candidates[rng.Next(candidates.Count)];
         }
 
         // For the simple one-shot actions (Mine, Trade, Job Board) — always

@@ -7,14 +7,28 @@ namespace StarBound.UI
 {
     // Full-screen match-over summary — see MatchHud, which shows this
     // instead of the normal HUD once Match.IsComplete. Same self-contained,
-    // runtime-built convention as TurnHandoffScreen/ModeSelectionScreen.
+    // runtime-built convention as TurnHandoffScreen/ModeSelectionScreen,
+    // and the same glass/SDF visual language as MatchHudChrome (see
+    // ScreenChromeKit) — panel rim is tinted to the winner's player color,
+    // same touch MatchHudChrome.SetHeader does for the in-match HUD.
     public class WinScreen : MonoBehaviour
     {
         // Never shown concurrently with TurnHandoffScreen (200) or the
         // pre-match screens (300) — order kept monotonic with the flow.
         private const int SortingOrder = 250;
+        private const float PanelWidth = 360f;
+
+        // Same values as MatchHud's PlayerOneColor/PlayerTwoColor —
+        // duplicated locally (those are private to MatchHud, and this
+        // screen has no other dependency on it) so a player's color
+        // identity stays consistent across the in-match HUD and this
+        // final summary.
+        private static readonly Color PlayerOneColor = new(0.2f, 0.9f, 0.9f);
+        private static readonly Color PlayerTwoColor = new(0.95f, 0.3f, 0.7f);
 
         private GameObject background;
+        private RectTransform panelRect;
+        private Material panelMaterial;
         private Text headerText;
         private Text statsText;
         private Button newMatchButton;
@@ -25,10 +39,16 @@ namespace StarBound.UI
             Hide();
         }
 
+        private void LateUpdate() => ScreenChromeKit.SyncPanelSize(panelMaterial, panelRect);
+
         public void Show(Match match, Action onNewMatch)
         {
             headerText.text = $"{match.Winner.DisplayName} wins the match!";
             statsText.text = DescribeMatch(match);
+
+            var winnerColor = match.Winner == match.PlayerOne ? PlayerOneColor : PlayerTwoColor;
+            panelMaterial.SetColor("_RimColor", winnerColor);
+            headerText.color = winnerColor;
 
             newMatchButton.onClick.RemoveAllListeners();
             newMatchButton.onClick.AddListener(() => onNewMatch());
@@ -52,95 +72,19 @@ namespace StarBound.UI
 
         private void BuildUI()
         {
-            var canvasObject = new GameObject("WinScreenCanvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            canvasObject.transform.SetParent(transform, false);
+            var (_, canvasRect) = ScreenChromeKit.CreateCanvas(transform, "WinScreenCanvas", SortingOrder);
+            background = ScreenChromeKit.CreateOpaqueBackground(canvasRect);
 
-            var canvas = canvasObject.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = SortingOrder;
+            var (panel, rect, material) = ScreenChromeKit.CreateGlassPanel(background.transform, PanelWidth, ScreenChromeKit.AccentColor);
+            panelRect = rect;
+            panelMaterial = material;
 
-            canvasObject.GetComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+            headerText = ScreenChromeKit.CreateText(panel.transform, string.Empty, fontSize: 26, bold: true);
+            statsText = ScreenChromeKit.CreateText(panel.transform, string.Empty, fontSize: 16);
 
-            background = new GameObject("Background", typeof(RectTransform), typeof(Image));
-            background.transform.SetParent(canvasObject.transform, false);
-            var backgroundRect = background.GetComponent<RectTransform>();
-            backgroundRect.anchorMin = Vector2.zero;
-            backgroundRect.anchorMax = Vector2.one;
-            backgroundRect.offsetMin = Vector2.zero;
-            backgroundRect.offsetMax = Vector2.zero;
-            background.GetComponent<Image>().color = new Color(0.05f, 0.05f, 0.08f, 1f);
-
-            var panel = new GameObject("WinPanel", typeof(RectTransform), typeof(VerticalLayoutGroup));
-            panel.transform.SetParent(background.transform, false);
-            var panelRect = panel.GetComponent<RectTransform>();
-            panelRect.anchorMin = new Vector2(0.5f, 0.5f);
-            panelRect.anchorMax = new Vector2(0.5f, 0.5f);
-            panelRect.pivot = new Vector2(0.5f, 0.5f);
-            panelRect.sizeDelta = new Vector2(760f, 460f);
-
-            var layout = panel.GetComponent<VerticalLayoutGroup>();
-            layout.spacing = 24f;
-            layout.padding = new RectOffset(20, 20, 20, 20);
-            layout.childAlignment = TextAnchor.MiddleCenter;
-            layout.childForceExpandWidth = false;
-            layout.childForceExpandHeight = false;
-            // Must be true or LayoutElement preferred-size hints below are
-            // silently ignored — see TurnHandoffScreen for the bug this caused.
-            layout.childControlWidth = true;
-            layout.childControlHeight = true;
-
-            headerText = CreateText(panel.transform, fontSize: 40, height: 100f);
-            statsText = CreateText(panel.transform, fontSize: 22, height: 160f);
-
-            newMatchButton = CreateButton(panel.transform, "New Match");
-        }
-
-        private static Text CreateText(Transform parent, int fontSize, float height)
-        {
-            var textObject = new GameObject("Text", typeof(RectTransform), typeof(Text), typeof(LayoutElement));
-            textObject.transform.SetParent(parent, false);
-
-            var layoutElement = textObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 760f;
-            layoutElement.preferredHeight = height;
-
-            var text = textObject.GetComponent<Text>();
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.fontSize = fontSize;
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.horizontalOverflow = HorizontalWrapMode.Wrap;
-            text.verticalOverflow = VerticalWrapMode.Overflow;
-
-            return text;
-        }
-
-        private static Button CreateButton(Transform parent, string label)
-        {
-            var buttonObject = new GameObject(label + "Button", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
-            buttonObject.transform.SetParent(parent, false);
-            buttonObject.GetComponent<Image>().color = new Color(0.2f, 0.7f, 0.3f);
-
-            var layoutElement = buttonObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 260f;
-            layoutElement.preferredHeight = 90f;
-
-            var textObject = new GameObject("Label", typeof(RectTransform), typeof(Text));
-            textObject.transform.SetParent(buttonObject.transform, false);
-            var textRect = textObject.GetComponent<RectTransform>();
-            textRect.anchorMin = Vector2.zero;
-            textRect.anchorMax = Vector2.one;
-            textRect.offsetMin = Vector2.zero;
-            textRect.offsetMax = Vector2.zero;
-
-            var text = textObject.GetComponent<Text>();
-            text.text = label;
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.fontSize = 26;
-
-            return buttonObject.GetComponent<Button>();
+            var (newMatch, _, _) = ScreenChromeKit.CreateButton(panel.transform, "New Match", ScreenChromeKit.ConfirmColor,
+                interactable: true, GlassPanelMaterials.Style.Button, width: 0f, height: 52f, fontSize: 20, stretchWidth: true);
+            newMatchButton = newMatch;
         }
     }
 }

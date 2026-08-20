@@ -247,6 +247,23 @@ namespace StarBound.Tests
             Assert.AreEqual(3 - CombatResolver.BraceEnergyCost, player.GetStat(CoreStat.Energy));
         }
 
+        // The mirror direction — previously impossible: the player-attacking
+        // branch used to have no brace parameter at all, so the opponent
+        // could never brace while defending. Now symmetric (see
+        // EngagementSession.CanOpponentDecideDefense in the PvP flow).
+        [Test]
+        public void ResolveAttack_PlayerAttacksAndOpponentBraces_BoostsShieldsAndCostsEnergy()
+        {
+            var player = new Ship(cargoCapacity: 0);
+            var opponent = new Ship(cargoCapacity: 0); // Shields default 3, Energy default 3
+
+            var result = CombatResolver.ResolveAttack(player, opponent, RoundAttacker.Player, new Random(1), wantsBrace: true);
+
+            Assert.IsTrue(result.DefenderBraced);
+            Assert.AreEqual(result.DefenseRoll + 3 + CombatResolver.BraceShieldBonus, result.DefenseTotal);
+            Assert.AreEqual(3 - CombatResolver.BraceEnergyCost, opponent.GetStat(CoreStat.Energy));
+        }
+
         [Test]
         public void ResolveAttack_Brace_CanTurnAHitIntoAMiss()
         {
@@ -301,7 +318,10 @@ namespace StarBound.Tests
             Assert.AreEqual(0, player.GetStat(CoreStat.Energy));
         }
 
-        // --- ResolveEscapeAttempt (player-initiated only, but now a contested roll both ways) ---
+        // --- ResolveEscapeAttempt (a contested roll both ways; the escapee/other
+        // params aren't hardcoded to player/opponent, so EngagementSession can
+        // run this for either side — these tests exercise it the same way the
+        // player's own AttemptEscape does) ---
 
         [Test]
         public void ResolveEscapeAttempt_Success_NoEnergyLoss()

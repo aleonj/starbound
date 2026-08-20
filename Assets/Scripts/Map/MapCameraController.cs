@@ -15,6 +15,15 @@ namespace StarBound.Map
     public class MapCameraController : MonoBehaviour
     {
         private const float CameraPadding = 1.8f;
+        // Roughly how many hex-radii of the board are visible at the
+        // start of a match — fixed regardless of map size (see
+        // Initialize), unlike maxOrthoSize below which scales with
+        // mapRadius. Confirmed via three side-by-side screenshots
+        // (Small/Medium/Large) that starting at maxOrthoSize (the whole-
+        // map-fit ceiling) made every match's initial hex scale look
+        // different depending on map size — this constant restores a
+        // single, consistent starting zoom instead.
+        private const float DefaultStartingOrthoSizePerHex = 7f;
         private const float DragThresholdPixels = 12f;
         private const float PinchZoomSpeed = 0.02f;
         // Starting guess, not verified against a real trackpad/mouse yet —
@@ -77,10 +86,10 @@ namespace StarBound.Map
         // new map and clears any in-progress gesture from the last match.
         public void Initialize(int mapRadius, float hexRadius)
         {
-            // Same formula as the old FitCameraToMap — keeps the initial
-            // framing identical to before, and doubles as the zoom-out
-            // ceiling since zooming out further than "whole map visible"
-            // isn't useful.
+            // The zoom-out ceiling — scales with mapRadius since a
+            // bigger map genuinely needs to zoom out further to fit on
+            // screen. No longer used as the INITIAL zoom (see below) —
+            // just the far end of the zoom range.
             maxOrthoSize = Mathf.Max(mapRadius * hexRadius * CameraPadding, 2f);
             // Roughly 3 hexes of radius visible at full zoom-in, clamped
             // so a tiny map (where maxOrthoSize is already small) can't
@@ -99,7 +108,14 @@ namespace StarBound.Map
 
             if (orthoCamera != null && orthoCamera.orthographic)
             {
-                orthoCamera.orthographicSize = maxOrthoSize;
+                // Fixed starting zoom, not maxOrthoSize (whole-map-fit) —
+                // that ceiling still scales with mapRadius so players can
+                // pinch/scroll all the way out to frame an entire Medium
+                // or Large map, but the DEFAULT view every match opens
+                // on is the same hex scale no matter which map size was
+                // picked. Clamped into this map's own valid zoom range
+                // so a tiny custom map can't start outside its own bounds.
+                orthoCamera.orthographicSize = Mathf.Clamp(hexRadius * DefaultStartingOrthoSizePerHex, minOrthoSize, maxOrthoSize);
                 var position = orthoCamera.transform.position;
                 orthoCamera.transform.position = new Vector3(0f, 0f, position.z);
             }
@@ -172,7 +188,7 @@ namespace StarBound.Map
 
             var scroll = mouse.scroll.ReadValue().y;
             if (Mathf.Abs(scroll) > Mathf.Epsilon)
-                ApplyZoomDelta(-scroll * ScrollZoomSpeed);
+                ApplyZoomDelta(-scroll * ScrollZoomSpeed, position);
         }
 
         private void HandleMiddleDrag(Mouse mouse, Vector2 position)
@@ -246,8 +262,10 @@ namespace StarBound.Map
             }
 
             // Fingers moving apart (distance increasing) should zoom in
-            // (orthographicSize decreasing), hence the negation.
-            ApplyZoomDelta(-(distance - previousPinchDistance) * PinchZoomSpeed);
+            // (orthographicSize decreasing), hence the negation. Anchored
+            // on the pinch midpoint (see ApplyZoomDelta) so the point
+            // between your fingers stays put as you zoom.
+            ApplyZoomDelta(-(distance - previousPinchDistance) * PinchZoomSpeed, (touchA + touchB) * 0.5f);
             previousPinchDistance = distance;
         }
 
@@ -260,9 +278,33 @@ namespace StarBound.Map
             ClampPosition();
         }
 
-        private void ApplyZoomDelta(float sizeDelta)
+        // Anchored zoom: whatever world point currently sits under
+        // anchorScreenPosition (the pinch midpoint, or the mouse cursor
+        // for scroll-zoom) stays under that same screen position after
+        // the size change, exactly like Google Maps/most map apps. This
+        // is what makes the zoom pivot a single, predictable point
+        // regardless of map size — the old version only changed
+        // orthographicSize and left camera position untouched, which
+        // pivoted around the screen center on paper, but ClampPosition
+        // afterward would silently re-center small maps (little pan room
+        // means clamping kicks in on almost every zoom step) while
+        // rarely affecting large ones (lots of pan room), so the felt
+        // pivot drifted depending on map size. Anchoring explicitly to a
+        // screen position sidesteps that entirely — the math doesn't
+        // depend on the map's clamp bounds at all, only clamping the
+        // final result the same way every other mutator here already
+        // does. Same ScreenToWorldPoint-diff technique as ApplyPan.
+        private void ApplyZoomDelta(float sizeDelta, Vector2 anchorScreenPosition)
         {
+            var distanceFromCamera = Mathf.Abs(orthoCamera.transform.position.z);
+            var anchorScreenPoint = new Vector3(anchorScreenPosition.x, anchorScreenPosition.y, distanceFromCamera);
+            var worldBefore = orthoCamera.ScreenToWorldPoint(anchorScreenPoint);
+
             orthoCamera.orthographicSize = Mathf.Clamp(orthoCamera.orthographicSize + sizeDelta, minOrthoSize, maxOrthoSize);
+
+            var worldAfter = orthoCamera.ScreenToWorldPoint(anchorScreenPoint);
+            orthoCamera.transform.position += worldBefore - worldAfter;
+
             ClampPosition();
         }
 

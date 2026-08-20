@@ -7,10 +7,10 @@
 // texture. Styled as thin glowing outline strokes (bright core + soft
 // halo, matching EngagementBeacon.shader's glow vocabulary) rather than
 // filled shapes, since outlines stay legible at small icon sizes while
-// filled blobs lose their silhouette — Energy and ClearSpace are the
-// deliberate exceptions (a zigzag outline reads as two wobbly lines at
-// this size, filled reads as a bolt immediately; scattered stars read
-// better as small filled dots than thin outlined circles).
+// filled blobs lose their silhouette — Hull and ClearSpace are the
+// deliberate exceptions (a heart silhouette needs to be filled to read
+// as "health" instead of two stray circles and a triangle; scattered
+// stars read better as small filled dots than thin outlined circles).
 Shader "StarBound/IconGlyph"
 {
     Properties
@@ -110,19 +110,29 @@ Shader "StarBound/IconGlyph"
                 outlineDist = 1e5;
                 filledDist = 1e5;
 
-                if (glyph == 0) // Hull — domed rounded-box top, triangular point at the bottom
+                if (glyph == 0) // Hull — filled heart (two circular lobes + a
+                                 // triangular point), the universal "health"
+                                 // symbol — replaces an earlier domed-badge
+                                 // shape that read too similarly to Shields'
+                                 // own "forcefield bubble" silhouette and
+                                 // wasn't recognized as health at a glance
                 {
-                    float dome = SdfRoundedBox(p - float2(0, 0.15), float2(0.42, 0.30), 0.28);
-                    float point_ = SdfTriangleIsosceles(p - float2(0, -0.55), float2(0.42, 0.35));
-                    outlineDist = abs(min(dome, point_));
+                    float2 hp = p - float2(0, 0.08);
+                    float lobeLeft = SdfCircle(hp - float2(-0.26, 0.22), 0.34);
+                    float lobeRight = SdfCircle(hp - float2(0.26, 0.22), 0.34);
+                    float point_ = SdfTriangleIsosceles(hp - float2(0, -0.62), float2(0.5, 0.62));
+                    filledDist = min(min(lobeLeft, lobeRight), point_);
                 }
-                else if (glyph == 1) // Energy — two staggered rotated boxes, filled
+                else if (glyph == 1) // Energy — a proper lightning-bolt zigzag
+                                      // (3 connected strokes), replacing an
+                                      // earlier two-staggered-boxes attempt
+                                      // that read as two disconnected shapes
+                                      // rather than a single bolt
                 {
-                    float2 pA = Rotate(p - float2(-0.10, 0.12), 0.35);
-                    float2 pB = Rotate(p - float2(0.10, -0.12), -0.35);
-                    float boxA = SdfBox(pA, float2(0.09, 0.42));
-                    float boxB = SdfBox(pB, float2(0.09, 0.42));
-                    filledDist = min(boxA, boxB);
+                    float segA = SdfSegment(p, float2(0.12, 0.85), float2(-0.32, 0.05));
+                    float segB = SdfSegment(p, float2(-0.32, 0.05), float2(0.08, 0.05));
+                    float segC = SdfSegment(p, float2(0.08, 0.05), float2(-0.15, -0.85));
+                    outlineDist = min(segA, min(segB, segC));
                 }
                 else if (glyph == 2) // Weapons — ring + 4 ticks + filled center dot
                 {

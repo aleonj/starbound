@@ -10,25 +10,33 @@ namespace StarBound.UI
     // picks map size before a Pass-and-Play match starts. No difficulty
     // picker: out of scope for now, DemoBootstrap keeps a fixed internal
     // difficulty. Same self-contained, runtime-built Canvas convention as
-    // the other UI screens.
+    // the other UI screens, and the same glass/SDF visual language as
+    // MatchHudChrome (see ScreenChromeKit).
     public class MatchSetupScreen : MonoBehaviour
     {
         private const int SortingOrder = 300;
+        private const float PanelWidth = 360f;
         private const MapSize DefaultMapSize = MapSize.Small;
 
-        private static readonly Color SelectedColor = new(0.2f, 0.7f, 0.3f);
-        private static readonly Color UnselectedColor = new(0.25f, 0.25f, 0.3f);
-        private static readonly Color StartColor = new(0.2f, 0.5f, 0.8f);
+        // Same values as MatchHudChrome's SelectedDieColor/IdleDieColor —
+        // duplicated locally rather than shared, since this screen has no
+        // other dependency on MatchHudChrome, but the colors themselves
+        // are kept identical so "selected" reads the same everywhere in
+        // the app.
+        private static readonly Color SelectedColor = new(0.2f, 0.5f, 0.8f);
+        private static readonly Color UnselectedColor = new(0.22f, 0.22f, 0.26f);
 
         private static readonly (MapSize Size, string Label)[] MapSizeOptions =
         {
-            (MapSize.Small, "Small (Recommended)"),
+            (MapSize.Small, "Small"),
             (MapSize.Medium, "Medium"),
             (MapSize.Large, "Large"),
         };
 
         private GameObject background;
-        private readonly Dictionary<MapSize, Button> mapSizeButtons = new();
+        private RectTransform panelRect;
+        private Material panelMaterial;
+        private readonly Dictionary<MapSize, (Button Button, Material Material)> mapSizeButtons = new();
         private MapSize selectedMapSize;
         private Action<MapSize> onStart;
 
@@ -37,6 +45,8 @@ namespace StarBound.UI
             BuildUI();
             Hide();
         }
+
+        private void LateUpdate() => ScreenChromeKit.SyncPanelSize(panelMaterial, panelRect);
 
         public void Show(Action<MapSize> onStart)
         {
@@ -50,120 +60,49 @@ namespace StarBound.UI
         private void SelectMapSize(MapSize size)
         {
             selectedMapSize = size;
-            foreach (var (optionSize, button) in mapSizeButtons)
-                button.GetComponent<Image>().color = optionSize == size ? SelectedColor : UnselectedColor;
+            foreach (var (optionSize, entry) in mapSizeButtons)
+            {
+                var color = optionSize == size ? SelectedColor : UnselectedColor;
+                entry.Button.GetComponent<Image>().color = color;
+                entry.Material.SetColor("_RimColor", color);
+            }
         }
 
         private void BuildUI()
         {
-            var canvasObject = new GameObject("MatchSetupCanvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            canvasObject.transform.SetParent(transform, false);
+            var (_, canvasRect) = ScreenChromeKit.CreateCanvas(transform, "MatchSetupCanvas", SortingOrder);
+            background = ScreenChromeKit.CreateOpaqueBackground(canvasRect);
 
-            var canvas = canvasObject.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = SortingOrder;
+            var (panel, rect, material) = ScreenChromeKit.CreateGlassPanel(background.transform, PanelWidth, ScreenChromeKit.AccentColor);
+            panelRect = rect;
+            panelMaterial = material;
 
-            canvasObject.GetComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
-
-            background = new GameObject("Background", typeof(RectTransform), typeof(Image));
-            background.transform.SetParent(canvasObject.transform, false);
-            var backgroundRect = background.GetComponent<RectTransform>();
-            backgroundRect.anchorMin = Vector2.zero;
-            backgroundRect.anchorMax = Vector2.one;
-            backgroundRect.offsetMin = Vector2.zero;
-            backgroundRect.offsetMax = Vector2.zero;
-            background.GetComponent<Image>().color = new Color(0.05f, 0.05f, 0.08f, 1f);
-
-            var panel = new GameObject("SetupPanel", typeof(RectTransform), typeof(VerticalLayoutGroup));
-            panel.transform.SetParent(background.transform, false);
-            var panelRect = panel.GetComponent<RectTransform>();
-            panelRect.anchorMin = new Vector2(0.5f, 0.5f);
-            panelRect.anchorMax = new Vector2(0.5f, 0.5f);
-            panelRect.pivot = new Vector2(0.5f, 0.5f);
-            panelRect.sizeDelta = new Vector2(760f, 400f);
-
-            var layout = panel.GetComponent<VerticalLayoutGroup>();
-            layout.spacing = 24f;
-            layout.padding = new RectOffset(20, 20, 20, 20);
-            layout.childAlignment = TextAnchor.MiddleCenter;
-            layout.childForceExpandWidth = false;
-            layout.childForceExpandHeight = false;
-            layout.childControlWidth = true;
-            layout.childControlHeight = true;
-
-            CreateText(panel.transform, "Match Setup", fontSize: 40, height: 80f);
-            CreateText(panel.transform, "Map Size", fontSize: 24, height: 40f);
+            ScreenChromeKit.CreateText(panel.transform, "Match Setup", fontSize: 28, bold: true);
+            ScreenChromeKit.CreateText(panel.transform, "Map Size", fontSize: 16);
 
             var row = new GameObject("MapSizeRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
             row.transform.SetParent(panel.transform, false);
             var rowLayout = row.GetComponent<HorizontalLayoutGroup>();
-            rowLayout.spacing = 16f;
+            rowLayout.spacing = 12f;
             rowLayout.childAlignment = TextAnchor.MiddleCenter;
             rowLayout.childForceExpandWidth = false;
             rowLayout.childForceExpandHeight = false;
             rowLayout.childControlWidth = true;
             rowLayout.childControlHeight = true;
-            row.GetComponent<LayoutElement>().preferredHeight = 90f;
+            row.GetComponent<LayoutElement>().preferredHeight = 52f;
 
             foreach (var (size, label) in MapSizeOptions)
             {
                 var captured = size;
-                var button = CreateButton(row.transform, label, UnselectedColor, width: 220f);
+                var (button, _, buttonMaterial) = ScreenChromeKit.CreateButton(row.transform, label, UnselectedColor,
+                    interactable: true, GlassPanelMaterials.Style.Button, width: 96f, height: 52f, fontSize: 15);
                 button.onClick.AddListener(() => SelectMapSize(captured));
-                mapSizeButtons[size] = button;
+                mapSizeButtons[size] = (button, buttonMaterial);
             }
 
-            var startButton = CreateButton(panel.transform, "Start Match", StartColor, width: 260f);
+            var (startButton, _, _) = ScreenChromeKit.CreateButton(panel.transform, "Start Match", ScreenChromeKit.ConfirmColor,
+                interactable: true, GlassPanelMaterials.Style.Button, width: 0f, height: 52f, fontSize: 20, stretchWidth: true);
             startButton.onClick.AddListener(() => onStart?.Invoke(selectedMapSize));
-        }
-
-        private static Text CreateText(Transform parent, string content, int fontSize, float height)
-        {
-            var textObject = new GameObject("Text", typeof(RectTransform), typeof(Text), typeof(LayoutElement));
-            textObject.transform.SetParent(parent, false);
-
-            var layoutElement = textObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 760f;
-            layoutElement.preferredHeight = height;
-
-            var text = textObject.GetComponent<Text>();
-            text.text = content;
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.fontSize = fontSize;
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.horizontalOverflow = HorizontalWrapMode.Wrap;
-            text.verticalOverflow = VerticalWrapMode.Overflow;
-
-            return text;
-        }
-
-        private static Button CreateButton(Transform parent, string label, Color color, float width)
-        {
-            var buttonObject = new GameObject(label + "Button", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
-            buttonObject.transform.SetParent(parent, false);
-            buttonObject.GetComponent<Image>().color = color;
-
-            var layoutElement = buttonObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = width;
-            layoutElement.preferredHeight = 90f;
-
-            var textObject = new GameObject("Label", typeof(RectTransform), typeof(Text));
-            textObject.transform.SetParent(buttonObject.transform, false);
-            var textRect = textObject.GetComponent<RectTransform>();
-            textRect.anchorMin = Vector2.zero;
-            textRect.anchorMax = Vector2.one;
-            textRect.offsetMin = Vector2.zero;
-            textRect.offsetMax = Vector2.zero;
-
-            var text = textObject.GetComponent<Text>();
-            text.text = label;
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.fontSize = 22;
-
-            return buttonObject.GetComponent<Button>();
         }
     }
 }

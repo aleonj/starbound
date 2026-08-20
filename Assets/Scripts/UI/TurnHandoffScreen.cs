@@ -6,20 +6,31 @@ using StarBound.Core;
 namespace StarBound.UI
 {
     // Full-screen "pass the device" confirmation between turns — see
-    // MatchHud. Same self-contained, runtime-built convention as
-    // MapConfirmationUI, but opaque and covering the whole viewport
-    // instead of a small floating panel, since its entire job is to
-    // fully hide whatever was on screen before it.
+    // MatchHud. Opaque and covering the whole viewport, since its entire
+    // job is to fully hide whatever was on screen before it. Same
+    // glass/SDF visual language as MatchHudChrome (see ScreenChromeKit)
+    // — the stat row reuses the exact icons already shipped and legible
+    // in the in-match HUD, not a new blind icon design.
     public class TurnHandoffScreen : MonoBehaviour
     {
-        // Above MapConfirmationUI's 100 — this must always win, since it
+        // Above PopupDialog's 150 — this must always win, since it
         // exists specifically to guarantee nothing behind it is visible.
         private const int SortingOrder = 200;
+        private const float PanelWidth = 340f;
 
         private GameObject background;
+        private RectTransform panelRect;
+        private Material panelMaterial;
         private Text headerText;
-        private Text statsText;
+        private Text hullValueText;
+        private Text energyValueText;
+        private Text weaponsValueText;
+        private Text shieldsValueText;
+        private Text speedValueText;
+        private Text moneyValueText;
+        private Text winsText;
         private Button beginTurnButton;
+        private Text beginTurnLabel;
 
         private void Awake()
         {
@@ -27,10 +38,29 @@ namespace StarBound.UI
             Hide();
         }
 
-        public void Show(Player incomingPlayer, Action onReady)
+        private void LateUpdate() => ScreenChromeKit.SyncPanelSize(panelMaterial, panelRect);
+
+        // readyLabel: lets a mid-fight reuse (see EngagementSession's
+        // symmetric PvP opponent-defense flow in MatchHud) say something
+        // other than "Begin Turn" — this screen's own "physically hand
+        // the device over" moment is exactly what that flow also needs,
+        // no reason to build a second one.
+        public void Show(Player incomingPlayer, Action onReady, string readyLabel = "Begin Turn")
         {
             headerText.text = $"Pass the device to\n{incomingPlayer.DisplayName}";
-            statsText.text = DescribeAtAGlance(incomingPlayer);
+            beginTurnLabel.text = readyLabel;
+
+            var ship = incomingPlayer.Ship;
+            hullValueText.text = ship.GetStat(CoreStat.Hull).ToString();
+            energyValueText.text = ship.GetStat(CoreStat.Energy).ToString();
+            weaponsValueText.text = ship.GetStat(CoreStat.Weapons).ToString();
+            shieldsValueText.text = ship.GetStat(CoreStat.Shields).ToString();
+            speedValueText.text = ship.GetStat(CoreStat.Speed).ToString();
+            moneyValueText.text = $"${ship.Money}";
+
+            winsText.text =
+                $"Wins — Easy: {incomingPlayer.EasyEngagementWins}  Medium: {incomingPlayer.MediumEngagementWins}  " +
+                $"Hard: {incomingPlayer.HardEngagementWins}/{Player.HardWinsToVictory}";
 
             beginTurnButton.onClick.RemoveAllListeners();
             beginTurnButton.onClick.AddListener(() => onReady());
@@ -40,115 +70,52 @@ namespace StarBound.UI
 
         public void Hide() => background.SetActive(false);
 
-        private static string DescribeAtAGlance(Player player)
-        {
-            var ship = player.Ship;
-            return
-                $"Hull {ship.GetStat(CoreStat.Hull)}  Energy {ship.GetStat(CoreStat.Energy)}  " +
-                $"Weapons {ship.GetStat(CoreStat.Weapons)}  Shields {ship.GetStat(CoreStat.Shields)}  " +
-                $"Speed {ship.GetStat(CoreStat.Speed)}\n" +
-                $"Money: {ship.Money}\n" +
-                $"Wins — Easy: {player.EasyEngagementWins}  Medium: {player.MediumEngagementWins}  " +
-                $"Hard: {player.HardEngagementWins}/{Player.HardWinsToVictory}";
-        }
-
         private void BuildUI()
         {
-            var canvasObject = new GameObject("HandoffCanvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            canvasObject.transform.SetParent(transform, false);
+            var (_, canvasRect) = ScreenChromeKit.CreateCanvas(transform, "HandoffCanvas", SortingOrder);
+            background = ScreenChromeKit.CreateOpaqueBackground(canvasRect);
 
-            var canvas = canvasObject.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = SortingOrder;
+            var (panel, rect, material) = ScreenChromeKit.CreateGlassPanel(background.transform, PanelWidth, ScreenChromeKit.AccentColor);
+            panelRect = rect;
+            panelMaterial = material;
 
-            // Constant pixel size — see MapConfirmationUI for why
-            // ScaleWithScreenSize is avoided here.
-            canvasObject.GetComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+            headerText = ScreenChromeKit.CreateText(panel.transform, string.Empty, fontSize: 26, bold: true);
 
-            background = new GameObject("Background", typeof(RectTransform), typeof(Image));
-            background.transform.SetParent(canvasObject.transform, false);
-            var backgroundRect = background.GetComponent<RectTransform>();
-            backgroundRect.anchorMin = Vector2.zero;
-            backgroundRect.anchorMax = Vector2.one;
-            backgroundRect.offsetMin = Vector2.zero;
-            backgroundRect.offsetMax = Vector2.zero;
-            background.GetComponent<Image>().color = new Color(0.05f, 0.05f, 0.08f, 1f); // fully opaque
+            var statsRow = CreateStatRow(panel.transform);
+            hullValueText = ScreenChromeKit.CreateIconStat(statsRow, IconGlyphMaterials.Glyph.Hull, "Hull", valueFontSize: 16);
+            energyValueText = ScreenChromeKit.CreateIconStat(statsRow, IconGlyphMaterials.Glyph.Energy, "Nrg", valueFontSize: 16);
+            weaponsValueText = ScreenChromeKit.CreateIconStat(statsRow, IconGlyphMaterials.Glyph.Weapons, "Wpn", valueFontSize: 16);
+            shieldsValueText = ScreenChromeKit.CreateIconStat(statsRow, IconGlyphMaterials.Glyph.Shields, "Shld", valueFontSize: 16);
+            speedValueText = ScreenChromeKit.CreateIconStat(statsRow, IconGlyphMaterials.Glyph.Speed, "Spd", valueFontSize: 16);
 
-            var panel = new GameObject("HandoffPanel", typeof(RectTransform), typeof(VerticalLayoutGroup));
-            panel.transform.SetParent(background.transform, false);
-            var panelRect = panel.GetComponent<RectTransform>();
-            panelRect.anchorMin = new Vector2(0.5f, 0.5f);
-            panelRect.anchorMax = new Vector2(0.5f, 0.5f);
-            panelRect.pivot = new Vector2(0.5f, 0.5f);
-            panelRect.sizeDelta = new Vector2(700f, 400f);
+            // Money gets its own row rather than crowding onto the
+            // 5-stat row above — 6 icon+label columns didn't fit
+            // comfortably at this panel's width.
+            var moneyRow = CreateStatRow(panel.transform);
+            moneyValueText = ScreenChromeKit.CreateIconStat(moneyRow, IconGlyphMaterials.Glyph.Money, "Gold", valueFontSize: 16);
 
-            var layout = panel.GetComponent<VerticalLayoutGroup>();
-            layout.spacing = 24f;
-            layout.padding = new RectOffset(20, 20, 20, 20);
-            layout.childAlignment = TextAnchor.MiddleCenter;
-            layout.childForceExpandWidth = false;
-            layout.childForceExpandHeight = false;
-            // Unlike MapConfirmationUI's buttons (which set their own
-            // explicit sizeDelta), these children rely on LayoutElement's
-            // preferred size — which only takes effect when the group is
-            // actually allowed to control it. Leaving these false (as
-            // MapConfirmationUI does) silently ignores preferredWidth/
-            // Height entirely, collapsing every child to Unity's ~100x100
-            // default RectTransform size — that was the actual bug.
-            layout.childControlWidth = true;
-            layout.childControlHeight = true;
+            // No established icon for a win tally — stays plain text
+            // rather than repeating last story's blind-icon mistake.
+            winsText = ScreenChromeKit.CreateText(panel.transform, string.Empty, fontSize: 15);
 
-            headerText = CreateText(panel.transform, fontSize: 40, height: 100f);
-            statsText = CreateText(panel.transform, fontSize: 24, height: 120f);
-            beginTurnButton = CreateButton(panel.transform, "Begin Turn");
+            var (begin, beginLabel, _) = ScreenChromeKit.CreateButton(panel.transform, "Begin Turn", ScreenChromeKit.ConfirmColor,
+                interactable: true, GlassPanelMaterials.Style.Button, width: 0f, height: 52f, fontSize: 20, stretchWidth: true);
+            beginTurnButton = begin;
+            beginTurnLabel = beginLabel;
         }
 
-        private static Text CreateText(Transform parent, int fontSize, float height)
+        private static Transform CreateStatRow(Transform parent)
         {
-            var textObject = new GameObject("Text", typeof(RectTransform), typeof(Text), typeof(LayoutElement));
-            textObject.transform.SetParent(parent, false);
-
-            var layoutElement = textObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 700f;
-            layoutElement.preferredHeight = height;
-
-            var text = textObject.GetComponent<Text>();
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.fontSize = fontSize;
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.horizontalOverflow = HorizontalWrapMode.Wrap;
-            text.verticalOverflow = VerticalWrapMode.Overflow; // never hard-clip if wrapped content needs a bit more room than preferredHeight
-
-            return text;
-        }
-
-        private static Button CreateButton(Transform parent, string label)
-        {
-            var buttonObject = new GameObject(label + "Button", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
-            buttonObject.transform.SetParent(parent, false);
-            buttonObject.GetComponent<Image>().color = new Color(0.2f, 0.7f, 0.3f);
-
-            var layoutElement = buttonObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 240f;
-            layoutElement.preferredHeight = 90f;
-
-            var textObject = new GameObject("Label", typeof(RectTransform), typeof(Text));
-            textObject.transform.SetParent(buttonObject.transform, false);
-            var textRect = textObject.GetComponent<RectTransform>();
-            textRect.anchorMin = Vector2.zero;
-            textRect.anchorMax = Vector2.one;
-            textRect.offsetMin = Vector2.zero;
-            textRect.offsetMax = Vector2.zero;
-
-            var text = textObject.GetComponent<Text>();
-            text.text = label;
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.fontSize = 30;
-
-            return buttonObject.GetComponent<Button>();
+            var rowObject = new GameObject("StatRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+            rowObject.transform.SetParent(parent, false);
+            var rowLayout = rowObject.GetComponent<HorizontalLayoutGroup>();
+            rowLayout.spacing = 12f;
+            rowLayout.childAlignment = TextAnchor.MiddleCenter;
+            rowLayout.childForceExpandWidth = false;
+            rowLayout.childForceExpandHeight = false;
+            rowLayout.childControlWidth = true;
+            rowLayout.childControlHeight = true;
+            return rowObject.transform;
         }
     }
 }

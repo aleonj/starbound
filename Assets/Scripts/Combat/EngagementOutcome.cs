@@ -5,6 +5,10 @@ namespace StarBound.Combat
         InProgress,
         PlayerWon,
         PlayerLost,
-        PlayerEscaped
+        PlayerEscaped,
+        // PvP-only — the opponent successfully fled via
+        // EngagementSession.AttemptOpponentEscape. Never produced by an
+        // NPC engagement.
+        OpponentEscaped
     }
 }

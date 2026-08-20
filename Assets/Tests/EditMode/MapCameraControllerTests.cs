@@ -30,6 +30,14 @@ namespace StarBound.Tests
         private static readonly FieldInfo OrthoCameraField =
             typeof(MapCameraController).GetField("orthoCamera", BindingFlags.NonPublic | BindingFlags.Instance);
 
+        // No public accessor for maxOrthoSize (it's only consumed by the
+        // private, gesture-driven ApplyZoomDelta — see this file's own
+        // header comment on why gesture behavior isn't covered here), so
+        // Initialize_ZoomOutCeilingStillScalesWithMapSize below reads it
+        // directly via reflection, same technique as OrthoCameraField.
+        private static readonly FieldInfo MaxOrthoSizeField =
+            typeof(MapCameraController).GetField("maxOrthoSize", BindingFlags.NonPublic | BindingFlags.Instance);
+
         private GameObject cameraObject;
         private Camera camera;
         private MapCameraController controller;
@@ -69,17 +77,39 @@ namespace StarBound.Tests
             Assert.AreEqual(-10f, camera.transform.position.z, 0.001f);
         }
 
+        // Regression test for a real bug: three side-by-side screenshots
+        // at Small/Medium/Large map sizes (mapRadius 4/6/8 — see
+        // MapSize.cs) showed a visibly different starting hex scale on
+        // each, because Initialize used to start the camera at
+        // maxOrthoSize (the whole-map-fit ceiling), which scales with
+        // mapRadius by design. The starting zoom is now a fixed value
+        // (see MapCameraController's own DefaultStartingOrthoSizePerHex)
+        // regardless of map size.
+        [TestCase(4)]
+        [TestCase(6)]
+        [TestCase(8)]
+        public void Initialize_StartingOrthographicSizeIsTheSameRegardlessOfMapSize(int mapRadius)
+        {
+            controller.Initialize(mapRadius, hexRadius: 1f);
+
+            const float defaultStartingOrthoSizePerHex = 7f;
+            Assert.AreEqual(1f * defaultStartingOrthoSizePerHex, camera.orthographicSize, 0.001f);
+        }
+
+        // The starting zoom is fixed (see above), but the zoom-OUT
+        // ceiling still needs to scale with mapRadius — otherwise a
+        // Large map could never be zoomed out far enough to see in one
+        // view.
         [Test]
-        public void Initialize_SetsOrthographicSizeToFitTheWholeMap()
+        public void Initialize_ZoomOutCeilingStillScalesWithMapSize()
         {
             controller.Initialize(mapRadius: 6, hexRadius: 1f);
 
             // Mirrors MapCameraController's own private CameraPadding
-            // constant (1.8) — the same "whole map visible" formula the
-            // old one-shot FitCameraToMap used before this component
-            // replaced it (see Initialize's own comment).
+            // constant (1.8) — the "whole map visible" formula.
             const float cameraPadding = 1.8f;
-            Assert.AreEqual(6f * 1f * cameraPadding, camera.orthographicSize, 0.001f);
+            var maxOrthoSize = (float)MaxOrthoSizeField.GetValue(controller);
+            Assert.AreEqual(6f * 1f * cameraPadding, maxOrthoSize, 0.001f);
         }
 
         [Test]

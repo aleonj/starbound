@@ -7,28 +7,41 @@ namespace StarBound.Combat
     // reveal initiative before the attack resolves, and offer the
     // defender a Brace/Hold choice in between when the opponent attacks:
     //   1. ResolveInitiative: a contested Speed check (both sides roll)
-    //      decides who attacks this round.
+    //      decides who attacks this round. Itself splittable into
+    //      RollSpeedCheck (one side) + DetermineInitiative (pure
+    //      comparison) for PvP's real two-tap roll — see EngagementSession.
     //   2. ResolveAttack: the attacker rolls Weapons and the defender
     //      rolls Shields — both contested d10+stat checks — to decide
     //      whether the hit lands.
     // Both sides roll now — this used to be asymmetric (opponent never
     // rolled), which made PvE fights either trivial or swingy depending
-    // on how opponent stats were tuned. Escape is still player-initiated
-    // only (opponents never attempt their own escape), but resolving one
-    // is also a contested d10+Speed roll on both sides now, not the
-    // player's roll against a flat Speed stat.
+    // on how opponent stats were tuned. Escape/Brace are directional
+    // (escapee vs. the other side; attacker vs. defender) but not
+    // hardcoded to "player" — see ResolveEscapeAttempt/ResolveAttack —
+    // so a PvP caller can run either one for whichever side is actually
+    // acting (see EngagementSession.AttemptOpponentEscape and
+    // CanOpponentDecideDefense).
     public static class CombatResolver
     {
         public const int BraceShieldBonus = 2;
         public const int BraceEnergyCost = 1;
 
-        public static InitiativeResult ResolveInitiative(Ship player, Ship opponent, Random rng)
+        // A single d10 + Speed check for one side — split out of
+        // ResolveInitiative below so PvP can run each side's roll as a
+        // genuinely separate action, one per player's own tap (see
+        // EngagementSession.RollPlayerInitiative/
+        // RollOpponentInitiativeAndDetermineAttacker), rather than both
+        // rolls happening silently as a side effect of whoever taps first.
+        public static (int Roll, int Total) RollSpeedCheck(Ship ship, Random rng)
         {
-            var playerRoll = rng.Next(1, 11); // d10: 1-10
-            var playerTotal = playerRoll + player.GetStat(CoreStat.Speed);
-            var opponentRoll = rng.Next(1, 11);
-            var opponentTotal = opponentRoll + opponent.GetStat(CoreStat.Speed);
+            var roll = rng.Next(1, 11); // d10: 1-10
+            return (roll, roll + ship.GetStat(CoreStat.Speed));
+        }
 
+        // Pure comparison, no RNG — once both sides' rolls are known
+        // (however they were obtained), this decides who attacks.
+        public static InitiativeResult DetermineInitiative(int playerRoll, int playerTotal, int opponentRoll, int opponentTotal)
+        {
             var isPlayerCriticalFailure = playerRoll == 1;
             var attacker = !isPlayerCriticalFailure && playerTotal >= opponentTotal
                 ? RoundAttacker.Player
@@ -37,62 +50,81 @@ namespace StarBound.Combat
             return new InitiativeResult(attacker, playerRoll, playerTotal, opponentRoll, opponentTotal, isPlayerCriticalFailure);
         }
 
-        // wantsBrace is ignored when the player is the attacker — bracing
-        // only makes sense when defending against the opponent's attack.
-        public static RoundResult ResolveAttack(Ship player, Ship opponent, RoundAttacker attacker, Random rng, bool wantsBrace = false)
+        // Composes the two pieces above — same RNG consumption order
+        // (player rolls first, then opponent) and identical output as
+        // before the split, so every existing NPC-fight call site and
+        // test is unaffected. PvP uses the split pieces directly instead
+        // (see EngagementSession) for a real two-tap roll.
+        public static InitiativeResult ResolveInitiative(Ship player, Ship opponent, Random rng)
         {
-            if (attacker == RoundAttacker.Player)
-            {
-                var attackRoll = rng.Next(1, 11);
-                var isCriticalHit = attackRoll == 10;
-                var attackTotal = attackRoll + player.GetStat(CoreStat.Weapons);
-
-                var defenseRoll = rng.Next(1, 11);
-                var defenseTotal = defenseRoll + opponent.GetStat(CoreStat.Shields);
-
-                var hitLanded = isCriticalHit || attackTotal >= defenseTotal;
-                var damage = hitLanded ? (isCriticalHit ? 2 : 1) : 0;
-
-                if (damage > 0)
-                    opponent.ApplyStatDelta(CoreStat.Hull, -damage);
-
-                return new RoundResult(RoundAttacker.Player, attackRoll, attackTotal, defenseRoll, defenseTotal, hitLanded, isCriticalHit, damage, defenderBraced: false);
-            }
-            else
-            {
-                var braced = wantsBrace && player.GetStat(CoreStat.Energy) > 0;
-                if (braced)
-                    player.ApplyStatDelta(CoreStat.Energy, -BraceEnergyCost);
-
-                var attackRoll = rng.Next(1, 11);
-                var isCriticalHit = attackRoll == 10;
-                var attackTotal = attackRoll + opponent.GetStat(CoreStat.Weapons);
-
-                var defenseRoll = rng.Next(1, 11);
-                var defenseTotal = defenseRoll + player.GetStat(CoreStat.Shields) + (braced ? BraceShieldBonus : 0);
-
-                var hitLanded = isCriticalHit || attackTotal >= defenseTotal;
-                var damage = hitLanded ? (isCriticalHit ? 2 : 1) : 0;
-
-                if (damage > 0)
-                    player.ApplyStatDelta(CoreStat.Hull, -damage);
-
-                return new RoundResult(RoundAttacker.Opponent, attackRoll, attackTotal, defenseRoll, defenseTotal, hitLanded, isCriticalHit, damage, braced);
-            }
+            var (playerRoll, playerTotal) = RollSpeedCheck(player, rng);
+            var (opponentRoll, opponentTotal) = RollSpeedCheck(opponent, rng);
+            return DetermineInitiative(playerRoll, playerTotal, opponentRoll, opponentTotal);
         }
 
-        public static EscapeAttemptResult ResolveEscapeAttempt(Ship player, Ship opponent, Random rng)
+        // wantsBrace applies to whichever side is actually defending this
+        // round (kept its original name — CombatResolverTests.cs already
+        // calls this with the named argument `wantsBrace:`, and there's
+        // no real clarity gain worth breaking that) — unified from two
+        // near-duplicate branches (only one of which used to support
+        // bracing at all, since only the player could ever brace) into
+        // one generic attacker/defender flow. This is what makes brace
+        // symmetric for PvP: EngagementSession.ResolveAttack's own
+        // signature didn't need to change at all, since its own
+        // wantsBrace already forwards straight through to this one.
+        public static RoundResult ResolveAttack(Ship player, Ship opponent, RoundAttacker attacker, Random rng, bool wantsBrace = false)
         {
-            var roll = rng.Next(1, 11);
-            var total = roll + player.GetStat(CoreStat.Speed);
-            var opponentRoll = rng.Next(1, 11);
-            var opponentTotal = opponentRoll + opponent.GetStat(CoreStat.Speed);
-            var success = total >= opponentTotal;
+            var isPlayerAttacking = attacker == RoundAttacker.Player;
+            var attackerShip = isPlayerAttacking ? player : opponent;
+            var defenderShip = isPlayerAttacking ? opponent : player;
 
+            var braced = wantsBrace && defenderShip.GetStat(CoreStat.Energy) > 0;
+            if (braced)
+                defenderShip.ApplyStatDelta(CoreStat.Energy, -BraceEnergyCost);
+
+            var attackRoll = rng.Next(1, 11);
+            var isCriticalHit = attackRoll == 10;
+            var attackTotal = attackRoll + attackerShip.GetStat(CoreStat.Weapons);
+
+            var defenseRoll = rng.Next(1, 11);
+            var defenseTotal = defenseRoll + defenderShip.GetStat(CoreStat.Shields) + (braced ? BraceShieldBonus : 0);
+
+            var hitLanded = isCriticalHit || attackTotal >= defenseTotal;
+            var damage = hitLanded ? (isCriticalHit ? 2 : 1) : 0;
+
+            if (damage > 0)
+                defenderShip.ApplyStatDelta(CoreStat.Hull, -damage);
+
+            return new RoundResult(attacker, attackRoll, attackTotal, defenseRoll, defenseTotal, hitLanded, isCriticalHit, damage, braced);
+        }
+
+        // Pure comparison, no RNG — same split shape as
+        // DetermineInitiative, letting PvP run the escapee's roll and the
+        // other side's roll as two genuinely separate taps (see
+        // EngagementSession.BeginEscapeAttempt/BeginOpponentEscapeAttempt/
+        // ResolveEscapeIntercept) instead of both happening silently in
+        // one call.
+        public static EscapeAttemptResult DetermineEscapeOutcome(Ship escapee, int escapeeRoll, int escapeeTotal, int otherRoll, int otherTotal)
+        {
+            var success = escapeeTotal >= otherTotal;
             if (!success)
-                player.ApplyStatDelta(CoreStat.Energy, -1);
+                escapee.ApplyStatDelta(CoreStat.Energy, -1);
 
-            return new EscapeAttemptResult(roll, total, opponentRoll, opponentTotal, success);
+            return new EscapeAttemptResult(escapeeRoll, escapeeTotal, otherRoll, otherTotal, success);
+        }
+
+        // escapee vs. other, not hardcoded to player vs. opponent — lets
+        // a PvP caller run this for whichever side is actually attempting
+        // to flee (see EngagementSession.AttemptEscape/AttemptOpponentEscape).
+        // Composes the two pieces above — same RNG order (escapee rolls
+        // first, then other) and identical result as before the split, so
+        // NPC fights and existing call sites are unaffected. PvP uses the
+        // split pieces directly instead, for a real two-tap roll.
+        public static EscapeAttemptResult ResolveEscapeAttempt(Ship escapee, Ship other, Random rng)
+        {
+            var (roll, total) = RollSpeedCheck(escapee, rng);
+            var (otherRoll, otherTotal) = RollSpeedCheck(other, rng);
+            return DetermineEscapeOutcome(escapee, roll, total, otherRoll, otherTotal);
         }
     }
 }

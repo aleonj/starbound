@@ -15,9 +15,9 @@ namespace StarBound.UI
     // on top of this, since legacy OnGUI content always renders above any
     // Canvas regardless of sortingOrder.
     //
-    // Unlike the other UGUI screens (MapConfirmationUI, TurnHandoffScreen,
-    // etc.), which are created once in DemoBootstrap and reused across
-    // matches, this one is created fresh per match by MatchHud itself —
+    // Unlike the other UGUI screens (TurnHandoffScreen, WinScreen, etc.),
+    // which are created once in DemoBootstrap and reused across matches,
+    // this one is created fresh per match by MatchHud itself —
     // every value it shows is per-match/per-turn state, so there's no
     // reason to survive a match boundary.
     //
@@ -27,7 +27,7 @@ namespace StarBound.UI
     // IconGlyphMaterials) instead of plain text numbers.
     public class MatchHudChrome : MonoBehaviour
     {
-        // Below MapConfirmationUI's 100 — nothing else currently claims
+        // Below PopupDialog's 150 — nothing else currently claims
         // anything under 100, and chrome should never need to win over
         // any of the overlay/flow screens.
         private const int SortingOrder = 50;
@@ -92,9 +92,19 @@ namespace StarBound.UI
 
         private static readonly Color IdleDieColor = new(0.22f, 0.22f, 0.26f);
         private static readonly Color SelectedDieColor = new(0.2f, 0.5f, 0.8f);
-        private static readonly Color SpentDieColor = new(0.3f, 0.3f, 0.3f);
+        // Deliberately darker than IdleDieColor (was lighter before,
+        // which read backwards — a spent die should recede, not stand
+        // out more than one still available to pick) — combined with
+        // CreateIconButton's automatic icon/label dimming for
+        // non-interactable buttons, this makes spent dice clearly
+        // distinct at a glance instead of nearly identical to idle ones.
+        private static readonly Color SpentDieColor = new(0.14f, 0.14f, 0.16f);
         private static readonly Color ConfirmColor = new(0.2f, 0.7f, 0.3f);
         private static readonly Color AttackColor = new(0.7f, 0.25f, 0.25f);
+        // Same RGB as AttackColor above (both read as "destructive/
+        // negative" red) — named separately here for what it means in
+        // this context: backing out of a pending move, not an attack.
+        private static readonly Color CancelColor = new(0.7f, 0.25f, 0.25f);
         private static readonly Color UtilityColor = new(0.25f, 0.45f, 0.65f);
         private static readonly Color DisabledColor = new(0.3f, 0.3f, 0.3f);
         private static readonly Color DividerColor = new(1f, 1f, 1f, 0.12f);
@@ -149,6 +159,10 @@ namespace StarBound.UI
         private Button jobBoardButton;
         private Text jobBoardLabel;
         private Material jobBoardMaterial;
+        private Text activeJobStatusText;
+        private Button activeJobActionButton;
+        private Text activeJobActionLabel;
+        private Material activeJobActionMaterial;
         private Button attackButton;
         private Text attackLabel;
         private Button endTurnButton;
@@ -193,13 +207,14 @@ namespace StarBound.UI
         // Set*() calls below so refreshing values every frame doesn't
         // also re-allocate a fresh closure and re-register a listener
         // every frame.
-        public void Initialize(Action onAttack, Action onEndTurn, Action onToggleShop, Action onToggleJobBoard, Action onLocatePlayer)
+        public void Initialize(Action onAttack, Action onEndTurn, Action onToggleShop, Action onToggleJobBoard, Action onLocatePlayer, Action onActiveJobAction)
         {
             attackButton.onClick.AddListener(() => onAttack?.Invoke());
             endTurnButton.onClick.AddListener(() => onEndTurn?.Invoke());
             shopButton.onClick.AddListener(() => onToggleShop?.Invoke());
             jobBoardButton.onClick.AddListener(() => onToggleJobBoard?.Invoke());
             locateButton.onClick.AddListener(() => onLocatePlayer?.Invoke());
+            activeJobActionButton.onClick.AddListener(() => onActiveJobAction?.Invoke());
         }
 
         public void SetVisible(bool visible)
@@ -292,11 +307,40 @@ namespace StarBound.UI
                 attackLabel.text = label;
         }
 
-        // Shop/Job Board content stay full IMGUI (their own dedicated
-        // redesign stories) — these are just the always-visible toggle
-        // buttons, moved into chrome so they don't compete with the
-        // legacy overlay Rect for the same on-screen space at all times
-        // (that Rect is needed now only while a panel is actually open).
+        // Tracking an ACTIVE job (status + Mine/Deliver) is deliberately
+        // NOT part of the full-screen JobBoardScreen (which only handles
+        // browsing/accepting offers) — it stays here as a persistent,
+        // always-visible strip, exactly like Attack above, so tapping
+        // Deliver never requires opening a screen first. actionVisible is
+        // false for a Bounty job (the fight triggers automatically on
+        // arrival, there's nothing to tap); actionInteractable grays the
+        // button out (not just disables it — see JobBoardScreen's own
+        // Buy-button fix for why interactable alone isn't enough to read
+        // as disabled) when the player isn't in the right place/phase yet
+        // (e.g. "not on an Asteroids field").
+        public void SetActiveJob(bool visible, string statusText, string actionLabel, bool actionVisible, bool actionInteractable)
+        {
+            activeJobStatusText.gameObject.SetActive(visible);
+            if (visible)
+                activeJobStatusText.text = statusText;
+
+            activeJobActionButton.gameObject.SetActive(visible && actionVisible);
+            if (!actionVisible)
+                return;
+
+            activeJobActionLabel.text = actionLabel;
+            activeJobActionButton.interactable = actionInteractable;
+            var color = actionInteractable ? UtilityColor : DisabledColor;
+            activeJobActionButton.GetComponent<Image>().color = color;
+            activeJobActionMaterial.SetColor("_RimColor", color);
+        }
+
+        // Shop and Job Board's own content (browsing/buying, browsing/
+        // accepting) each have their own dedicated full-screen UGUI
+        // screen now (see RefreshShopScreen/RefreshJobBoardScreen) — these
+        // two methods are just their always-visible toggle buttons, kept
+        // in chrome so they don't compete with the map for the same
+        // on-screen space at all times.
         public void SetShop(bool interactable, string label)
         {
             var color = interactable ? UtilityColor : DisabledColor;
@@ -332,11 +376,45 @@ namespace StarBound.UI
         // The one relatively expensive piece (Destroy/Instantiate) — kept
         // off the per-frame path, called instead from MatchHud's existing
         // RefreshView() "state changed, resync" hook whenever the hand,
-        // selection, or move eligibility actually changes.
-        public void RefreshDiceTray(IReadOnlyList<RolledDie> dice, RolledDie selectedDie, bool hasHand, bool canMove, Action onRoll, Action<RolledDie> onDieClicked)
+        // selection, move eligibility, or pending move actually changes.
+        public void RefreshDiceTray(
+            IReadOnlyList<RolledDie> dice, RolledDie selectedDie, bool hasHand, bool canMove,
+            string pendingMoveLabel, Action onRoll, Action<RolledDie> onDieClicked,
+            Action onConfirmMove, Action onCancelMove)
         {
-            foreach (Transform child in diceButtonRow)
-                Destroy(child.gameObject);
+            // DestroyImmediate, not Destroy — Destroy defers actual
+            // removal to end of frame, so the about-to-die old buttons
+            // stayed structurally present (and rendered) alongside the
+            // brand-new ones this method appends below for one whole
+            // frame, doubling the row's child count under its
+            // HorizontalLayoutGroup and producing a visible reflow
+            // "flash" on every rebuild (roll, select, deselect, confirm/
+            // cancel — anything that calls this). Safe here since this
+            // only ever runs from ordinary runtime click handlers, never
+            // from the physics loop or OnValidate. Indexed backward
+            // rather than foreach, since DestroyImmediate mutates
+            // diceButtonRow's live child list as it goes.
+            for (var i = diceButtonRow.childCount - 1; i >= 0; i--)
+                DestroyImmediate(diceButtonRow.GetChild(i).gameObject);
+
+            // A pending move (a die picked, then a legal hex tapped) takes
+            // over the exact same row dice normally occupy — the natural
+            // extension of "you just picked a die from this bar," rather
+            // than a separate floating panel appearing on top of it.
+            // Takes priority over every other state below.
+            if (!string.IsNullOrEmpty(pendingMoveLabel))
+            {
+                diceInstructionText.text = pendingMoveLabel;
+
+                var (confirmButton, _) = CreateButton(diceButtonRow, "Confirm", ConfirmColor, true,
+                    GlassPanelMaterials.Style.DieButton, width: 160f, height: DieButtonHeight, fontSize: 16);
+                confirmButton.onClick.AddListener(() => onConfirmMove?.Invoke());
+
+                var (cancelButton, _) = CreateButton(diceButtonRow, "Cancel", CancelColor, true,
+                    GlassPanelMaterials.Style.DieButton, width: 160f, height: DieButtonHeight, fontSize: 16);
+                cancelButton.onClick.AddListener(() => onCancelMove?.Invoke());
+                return;
+            }
 
             if (!hasHand)
             {
@@ -547,6 +625,23 @@ namespace StarBound.UI
             jobBoardButton = jobBoard;
             jobBoardLabel = jobBoardButton.GetComponentInChildren<Text>();
             jobBoardMaterial = jobBoardMat;
+
+            CreateDivider(content);
+            // Active job status/Mine/Deliver — see SetActiveJob's own
+            // comment for why this lives here rather than inside
+            // JobBoardScreen. Hidden by default; both toggled on/off
+            // together (status text only, no action, for a Bounty job
+            // mid-fight-trigger) rather than as separate always-visible
+            // rows, so there's no empty gap when there's no active job.
+            activeJobStatusText = CreateText(content, fontSize: 14, bold: false);
+            activeJobStatusText.gameObject.SetActive(false);
+
+            var (activeJobAction, activeJobActionMat) = CreateButton(content, string.Empty, UtilityColor, true,
+                GlassPanelMaterials.Style.Button, width: 0f, height: 44f, fontSize: 15, stretchWidth: true);
+            activeJobActionButton = activeJobAction;
+            activeJobActionLabel = activeJobActionButton.GetComponentInChildren<Text>();
+            activeJobActionMaterial = activeJobActionMat;
+            activeJobActionButton.gameObject.SetActive(false);
 
             CreateDivider(content);
             var (attack, _) = CreateButton(content, "Attack", AttackColor, true,
@@ -812,8 +907,26 @@ namespace StarBound.UI
                 iconRect.offsetMax = new Vector2(-iconPadding, -iconPadding);
             }
 
+            // Button.interactable has no visual effect on its own here —
+            // this is a runtime-built Button with no targetGraphic wired
+            // up (Selectable's auto-assign-on-Reset only runs in the
+            // Editor, not via AddComponent at runtime), so its built-in
+            // ColorTint transition never fires. The background square
+            // already gets an explicit different color from the caller
+            // (e.g. SpentDieColor vs IdleDieColor), but the icon glyph
+            // itself — the most visually prominent part of the button —
+            // used a shared, fixed-brightness material with no per-
+            // instance dimming at all, so a spent die's icon glowed
+            // exactly as brightly as an available one. Fixed by tinting
+            // the icon (and label) via their own Image/Text color, which
+            // IconGlyph.shader explicitly multiplies into its output
+            // (same vertex-color trick GlassPanel.shader uses) — this
+            // dims both without needing a second material per state.
+            var contentColor = interactable ? Color.white : new Color(1f, 1f, 1f, 0.35f);
+
             var iconImage = iconObject.GetComponent<Image>();
             iconImage.material = IconGlyphMaterials.Get(glyph);
+            iconImage.color = contentColor;
             iconImage.raycastTarget = false;
 
             if (hasLabel)
@@ -830,7 +943,7 @@ namespace StarBound.UI
                 labelText.text = label;
                 labelText.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
                 labelText.alignment = TextAnchor.MiddleCenter;
-                labelText.color = Color.white;
+                labelText.color = contentColor;
                 labelText.fontSize = 12;
                 labelText.horizontalOverflow = HorizontalWrapMode.Overflow;
                 labelText.verticalOverflow = VerticalWrapMode.Overflow;

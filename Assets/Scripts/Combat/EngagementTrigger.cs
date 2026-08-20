@@ -26,8 +26,9 @@ namespace StarBound.Combat
 
             var definition = EngagementDefinitionTable.For(hex.Engagement);
             var opponent = NpcShipGenerator.Generate(definition, rng);
+            var flavorText = EngagementFlavorText.PickRandom(hex.Engagement, rng);
 
-            return new EngagementSession(definition, player, opponent);
+            return new EngagementSession(definition, player, opponent, flavorText: flavorText);
         }
 
         public static void ClearMarker(GameMap map, HexCoordinate coordinate)

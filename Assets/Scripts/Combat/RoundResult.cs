@@ -24,9 +24,10 @@ namespace StarBound.Combat
         public bool WasCriticalHit { get; }
         public int Damage { get; }
 
-        // True when the player chose to Brace against an opponent attack
-        // (and had enough Energy to actually do so). Opponents have no
-        // equivalent — their Shields are never boosted when defending.
+        // True when the defending side (whichever that is — see
+        // CombatResolver.ResolveAttack) chose to Brace and had enough
+        // Energy to actually do so. Symmetric: in PvP either side can be
+        // the braced defender, not just the player.
         public bool DefenderBraced { get; }
 
         public RoundResult(

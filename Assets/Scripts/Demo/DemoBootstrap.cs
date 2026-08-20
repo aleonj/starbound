@@ -27,7 +27,6 @@ namespace StarBound.Demo
         // resizing it dynamically.
         private const float GalaxyBackgroundSize = 80f;
 
-        private static MapConfirmationUI confirmationUI;
         private static TurnHandoffScreen handoffScreen;
         private static ModeSelectionScreen modeSelectionScreen;
         private static MatchSetupScreen matchSetupScreen;
@@ -43,9 +42,6 @@ namespace StarBound.Demo
             EnsureEventSystem();
             CreateGalaxyBackground();
             EnsureMapCameraController();
-
-            var confirmationUIObject = new GameObject("MapConfirmationUI", typeof(MapConfirmationUI));
-            confirmationUI = confirmationUIObject.GetComponent<MapConfirmationUI>();
 
             var handoffScreenObject = new GameObject("TurnHandoffScreen", typeof(TurnHandoffScreen));
             handoffScreen = handoffScreenObject.GetComponent<TurnHandoffScreen>();
@@ -104,7 +100,7 @@ namespace StarBound.Demo
             markersRoot.transform.SetParent(worldRoot.transform, false);
 
             hudObject = new GameObject("MatchHud", typeof(MatchHud));
-            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius, confirmationUI, handoffScreen, winScreen, mapCameraController, popupDialog, OnNewMatchRequested);
+            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius, handoffScreen, winScreen, mapCameraController, popupDialog, OnNewMatchRequested);
 
             mapCameraController.Initialize(mapSize.ToRadius(), HexRadius);
         }

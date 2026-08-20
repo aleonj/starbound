@@ -7,14 +7,12 @@ namespace StarBound.UI
     // Shared, reusable confirmation/alert popup — every future screen
     // (shop, job board, trade, engagement, pause) can call ShowConfirmation
     // or ShowAlert instead of building its own dialog. Same "no prefabs,
-    // build at runtime" convention as MapConfirmationUI/TurnHandoffScreen.
+    // build at runtime" convention as TurnHandoffScreen.
     public class PopupDialog : MonoBehaviour
     {
-        // Between MapConfirmationUI (100) and TurnHandoffScreen (200) —
-        // needs to win over in-match panels the same tier MapConfirmationUI
-        // claims, but never needs to appear during turn handoff or the win
-        // screen, which are distinct app-flow phases a popup wouldn't
-        // reasonably be triggered during.
+        // Below TurnHandoffScreen's 200 — never needs to appear during
+        // turn handoff or the win screen, which are distinct app-flow
+        // phases a popup wouldn't reasonably be triggered during.
         private const int SortingOrder = 150;
 
         private static readonly Color ConfirmColor = new(0.2f, 0.7f, 0.3f);
@@ -42,12 +40,10 @@ namespace StarBound.UI
 
         public void Hide() => background.SetActive(false);
 
-        // Unlike MapConfirmationUI (whose one caller hides it manually as
-        // part of ConfirmPendingMove/CancelPendingMove), every button here
-        // hides the dialog itself before invoking its callback — with many
-        // future callers expected, requiring each one to remember to hide
-        // it is exactly the kind of repeated boilerplate this component
-        // exists to remove.
+        // Every button here hides the dialog itself before invoking its
+        // callback — with many future callers expected, requiring each
+        // one to remember to hide it is exactly the kind of repeated
+        // boilerplate this component exists to remove.
         private void Show(string title, string message, params (string Label, Color Color, Action Callback)[] buttons)
         {
             titleText.text = title;
@@ -125,8 +121,8 @@ namespace StarBound.UI
             rowLayout.childAlignment = TextAnchor.MiddleCenter;
             rowLayout.childForceExpandWidth = false;
             rowLayout.childForceExpandHeight = false;
-            // Buttons keep their own explicit sizeDelta, same reasoning as
-            // MapConfirmationUI's button row.
+            // Buttons keep their own explicit sizeDelta rather than being
+            // stretched/shrunk by the layout group.
             rowLayout.childControlWidth = false;
             rowLayout.childControlHeight = false;
 
