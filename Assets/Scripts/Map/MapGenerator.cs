@@ -28,17 +28,31 @@ namespace StarBound.Map
             var totalHexes = map.Hexes.Count;
             var distribution = TerrainDistributionTable.For(difficulty);
 
+            // Placed FIRST, before anything else competes for ClearSpace —
+            // moved ahead of clusters/planets specifically so its
+            // guaranteed-pair fallback (see PlaceWormholePairs/
+            // ForceWormholePair) always runs against a still-pristine map.
+            // That matters on the smallest map size: radius 4's own
+            // maximum possible hex-to-hex distance is exactly
+            // MinWormholeDistance (8), so the single farthest-apart pair
+            // has to still be available, uncompeted, for the guarantee to
+            // hold — placing wormholes after hazards/planets had already
+            // claimed hexes made that pair frequently unavailable, which
+            // is what let "zero wormholes" happen far too often in
+            // practice (see PlaceWormholePairs's own comment).
+            PlaceWormholePairs(map, rng, Budget(totalHexes, distribution.Wormhole));
+
             PlaceClusters(map, rng, TerrainType.Asteroids, Budget(totalHexes, distribution.Asteroids));
             PlaceClusters(map, rng, TerrainType.Mines, Budget(totalHexes, distribution.Mines));
             PlaceClusters(map, rng, TerrainType.Debris, Budget(totalHexes, distribution.Debris));
 
             // Planets are placed before tradelanes so routes have targets.
             // minDistance: 2 keeps planets from ever landing as neighbors
-            // of each other (distance 1) — same hard-rule pattern as
-            // PlaceWormholePairs below, not a best-effort fallback.
+            // of each other (distance 1) — same hard-rule pattern
+            // PlaceWormholePairs' own budget-respecting pass uses, not a
+            // best-effort fallback.
             var planets = PlaceSingles(map, rng, TerrainType.PlanetOrStarport, Budget(totalHexes, distribution.PlanetOrStarport), minDistance: 2);
             AssignPlanetNames(map, rng, planets);
-            PlaceWormholePairs(map, rng, Budget(totalHexes, distribution.Wormhole));
 
             ConnectPlanetsWithTradelanes(map, planets, rng, Budget(totalHexes, distribution.Tradelane));
 
@@ -257,13 +271,25 @@ namespace StarBound.Map
         // least MinWormholeDistance from every OTHER wormhole hex already
         // on the map — a second pair placed near a first pair is exactly
         // as wrong as the two hexes within one pair being close. The
-        // minimum distance is a hard rule, not best-effort: if no valid
-        // spot exists (map too small, or already too crowded with earlier
-        // pairs), placement just stops rather than placing a wormhole
-        // that violates it — fewer wormholes than the nominal budget
-        // (possibly zero) is the correct outcome, not a violation. Budget
-        // is a hex count, so an odd budget just leaves the last hex
-        // unspent rather than placing an unpaired wormhole.
+        // minimum distance is a hard rule for THIS budget-respecting pass,
+        // not best-effort: if no valid spot exists (map too small, or
+        // already too crowded with earlier pairs), placement just stops
+        // rather than placing a wormhole that violates it. Budget is a hex
+        // count, so an odd budget just leaves the last hex unspent rather
+        // than placing an unpaired wormhole.
+        //
+        // Falling short of the nominal budget this way is fine — but
+        // falling all the way to zero is not: Wormhole travel is a real,
+        // player-facing feature now (not just flavor), so every map needs
+        // at least one usable pair. Placed first in Generate(), before
+        // anything else claims ClearSpace, specifically so this can still
+        // happen even on the smallest map size (radius 4's maximum
+        // possible hex-to-hex distance is exactly MinWormholeDistance —
+        // the single farthest-apart pair has to still be free) — but a
+        // uniformly-random first pick can still land on a hex with no
+        // distance-8 partner at all (most hexes don't have one; see
+        // ForceWormholePair's own comment), so this pass can still end up
+        // with zero. A guaranteed fallback pair covers that gap.
         private static void PlaceWormholePairs(GameMap map, Random rng, int budget)
         {
             var pairCount = budget / 2;
@@ -297,6 +323,60 @@ namespace StarBound.Map
                     secondHex.Terrain = TerrainType.Wormhole;
                 placedWormholes.Add(second.Value);
             }
+
+            if (placedWormholes.Count == 0)
+                ForceWormholePair(map, rng);
+        }
+
+        // Guaranteed last resort when the budget-respecting pass above
+        // couldn't find even one MinWormholeDistance-apart pair — picks
+        // whichever two remaining ClearSpace hexes are farthest apart from
+        // EACH OTHER (not from any fixed minimum), so the pair is still as
+        // spread out as the map allows rather than landing on two adjacent
+        // hexes. Because Generate() places wormholes before anything else
+        // (see PlaceWormholePairs' own comment), "remaining ClearSpace"
+        // here is normally the ENTIRE map — so on radius 4 (Small), the
+        // farthest-apart pair this finds is exactly the map's true maximum
+        // distance (8), still satisfying MinWormholeDistance even though
+        // it isn't enforced by name; on any bigger map it clears the
+        // minimum with room to spare. A no-op (not a crash) on the
+        // pathological map with fewer than 2 ClearSpace hexes left —
+        // should never happen in practice, but isn't worth a hard failure
+        // over.
+        private static void ForceWormholePair(GameMap map, Random rng)
+        {
+            var clearSpace = map.Hexes
+                .Where(h => h.Terrain == TerrainType.ClearSpace)
+                .Select(h => h.Coordinate)
+                .ToList();
+            if (clearSpace.Count < 2)
+                return;
+
+            var bestDistance = -1;
+            var bestPairs = new List<(HexCoordinate First, HexCoordinate Second)>();
+            for (var i = 0; i < clearSpace.Count; i++)
+            {
+                for (var j = i + 1; j < clearSpace.Count; j++)
+                {
+                    var distance = HexMath.Distance(clearSpace[i], clearSpace[j]);
+                    if (distance > bestDistance)
+                    {
+                        bestDistance = distance;
+                        bestPairs.Clear();
+                        bestPairs.Add((clearSpace[i], clearSpace[j]));
+                    }
+                    else if (distance == bestDistance)
+                    {
+                        bestPairs.Add((clearSpace[i], clearSpace[j]));
+                    }
+                }
+            }
+
+            var (first, second) = bestPairs[rng.Next(bestPairs.Count)];
+            if (map.TryGetHex(first, out var firstHex))
+                firstHex.Terrain = TerrainType.Wormhole;
+            if (map.TryGetHex(second, out var secondHex))
+                secondHex.Terrain = TerrainType.Wormhole;
         }
 
         // A random ClearSpace hex at least minDistance from EVERY hex in

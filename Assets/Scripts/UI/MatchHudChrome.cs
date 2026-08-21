@@ -45,13 +45,16 @@ namespace StarBound.UI
         private static readonly Vector2 ReferenceResolution = new(400f, 866f);
         private const float ScalerMatchWidthOrHeight = 0f;
 
-        // Sized bottom-up from the hard constraint: exactly 5 dice
-        // (MovementDiceSet.Dice is a fixed 5-element array) must fit on
-        // one row without overflowing, each clearing the ~44pt minimum
-        // touch-target floor. Bigger than round 2's 58x48 now that dice
-        // have their own full-width bottom bar instead of sharing a
-        // narrower panel with three other rows.
-        private const float DieButtonWidth = 60f;
+        // Sized bottom-up from the hard constraint: up to 6 dice — the 5
+        // rolled (MovementDiceSet.Dice is a fixed 5-element array) plus
+        // the device-granted Wormhole die (see MatchHud.OnRollDiceClicked)
+        // when the current player holds the Wormhole Device — must fit on
+        // one row without overflowing, each still clearing the ~44pt
+        // minimum touch-target floor. Was 60f sized for exactly 5; a 6th
+        // die at that width overflowed DiceBarWidth's fixed panel (found
+        // as a real, visible bug in Play Mode once the Wormhole die
+        // shipped).
+        private const float DieButtonWidth = 48f;
         // Taller than it is wide now — icon-only dice didn't reliably
         // communicate their terrain (confirmed against real screenshots,
         // twice), so every die button carries a short text abbreviation
@@ -160,9 +163,6 @@ namespace StarBound.UI
         private Button jobBoardButton;
         private Text jobBoardLabel;
         private Material jobBoardMaterial;
-        private Button tradeButton;
-        private Text tradeLabel;
-        private Material tradeMaterial;
         private Button heldItemsButton;
         private GameObject activeJobDivider;
         private Text activeJobStatusText;
@@ -172,6 +172,8 @@ namespace StarBound.UI
         private GameObject attackDivider;
         private Button attackButton;
         private Text attackLabel;
+        private Button tradeButton;
+        private Text tradeLabel;
         private Button endTurnButton;
         private Material endTurnMaterial;
         private Text messageText;
@@ -328,6 +330,20 @@ namespace StarBound.UI
                 attackLabel.text = label;
         }
 
+        // Sits directly under Attack, sharing its divider — trading is the
+        // other thing sharing a hex with the opponent lets you do, so
+        // rather than a persistent "Open Trade" utility button always
+        // competing with Shop/Job Board for space, it only appears at all
+        // in the same moment Attack does (same visible/hidden shape as
+        // SetAttack, not the always-visible-but-sometimes-disabled shape
+        // Shop/Job Board's toggles use).
+        public void SetTrade(bool visible, string label)
+        {
+            tradeButton.gameObject.SetActive(visible);
+            if (visible)
+                tradeLabel.text = label;
+        }
+
         // Tracking an ACTIVE job (status + Mine/Deliver) is deliberately
         // NOT part of the full-screen JobBoardScreen (which only handles
         // browsing/accepting offers) — it stays here as a persistent,
@@ -379,15 +395,6 @@ namespace StarBound.UI
             jobBoardButton.GetComponent<Image>().color = color;
             jobBoardMaterial.SetColor("_RimColor", color);
             jobBoardLabel.text = label;
-        }
-
-        public void SetTrade(bool interactable, string label)
-        {
-            var color = interactable ? UtilityColor : DisabledColor;
-            tradeButton.interactable = interactable;
-            tradeButton.GetComponent<Image>().color = color;
-            tradeMaterial.SetColor("_RimColor", color);
-            tradeLabel.text = label;
         }
 
         public void SetEndTurn(bool canEndTurn)
@@ -499,8 +506,12 @@ namespace StarBound.UI
             dieButton.onClick.AddListener(() => onDieClicked.Invoke(capturedDie));
         }
 
-        // Every terrain a die face can actually show — Planet/Wormhole
-        // never appear on a face, see MovementDiceSet.
+        // Every terrain a die can actually show — Planet never appears on
+        // a die (see MovementDiceSet); Wormhole normally wouldn't either
+        // (too rare a face to design for), but MatchHud now grants a
+        // guaranteed synthetic Wormhole-terrain die whenever the current
+        // player holds the device (see OnRollDiceClicked), so it needs its
+        // own glyph like every other terrain here.
         private static IconGlyphMaterials.Glyph TerrainGlyph(TerrainType terrain) => terrain switch
         {
             TerrainType.ClearSpace => IconGlyphMaterials.Glyph.ClearSpace,
@@ -508,6 +519,7 @@ namespace StarBound.UI
             TerrainType.Asteroids => IconGlyphMaterials.Glyph.Asteroids,
             TerrainType.Debris => IconGlyphMaterials.Glyph.Debris,
             TerrainType.Mines => IconGlyphMaterials.Glyph.Mines,
+            TerrainType.Wormhole => IconGlyphMaterials.Glyph.Wormhole,
             _ => IconGlyphMaterials.Glyph.ClearSpace
         };
 
@@ -521,6 +533,7 @@ namespace StarBound.UI
             TerrainType.ClearSpace => "Clear",
             TerrainType.Tradelane => "Trade",
             TerrainType.Asteroids => "Ast.",
+            TerrainType.Wormhole => "W.Hole",
             _ => terrain.ToString()
         };
 
@@ -694,12 +707,6 @@ namespace StarBound.UI
             jobBoardLabel = jobBoardButton.GetComponentInChildren<Text>();
             jobBoardMaterial = jobBoardMat;
 
-            var (trade, tradeMat) = CreateButton(utilityRow.transform, "Open Trade", UtilityColor, true,
-                GlassPanelMaterials.Style.Button, width: 0f, height: 44f, fontSize: 15, stretchWidth: true);
-            tradeButton = trade;
-            tradeLabel = tradeButton.GetComponentInChildren<Text>();
-            tradeMaterial = tradeMat;
-
             // Always reachable — unlike Shop/Job Board, viewing held items
             // has no planet/turn-phase gate, so this never needs a
             // SetX(interactable, label) call from MatchHud's per-frame
@@ -739,6 +746,14 @@ namespace StarBound.UI
             attackButton = attack;
             attackLabel = attackButton.GetComponentInChildren<Text>();
             attackButton.gameObject.SetActive(false);
+
+            // No own divider — see SetTrade's own comment on why this
+            // sits directly under Attack instead.
+            var (trade, _) = CreateButton(content, "Trade", UtilityColor, true,
+                GlassPanelMaterials.Style.Button, width: 0f, height: 44f, fontSize: 15, stretchWidth: true);
+            tradeButton = trade;
+            tradeLabel = tradeButton.GetComponentInChildren<Text>();
+            tradeButton.gameObject.SetActive(false);
 
             messageText = CreateText(content, fontSize: 15, bold: false);
             messageText.gameObject.SetActive(false);

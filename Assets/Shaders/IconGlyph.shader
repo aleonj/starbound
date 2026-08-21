@@ -1,7 +1,8 @@
 // A small fixed set of glowing line-art icons — ship stats (Hull/Energy/
 // Weapons/Shields/Speed/Money/Cargo), HUD chrome controls (ChevronUp/
 // ChevronDown/LocatePin), and dice-face terrain (ClearSpace/Tradelane/
-// Asteroids/Debris/Mines) — selected via _Glyph, drawn as SDF shapes. No
+// Asteroids/Debris/Mines/Wormhole) — selected via _Glyph, drawn as SDF
+// shapes. No
 // icon image assets exist or are planned, so every glyph is built from a
 // handful of primitives (see Include/UISdfCommon.hlsl) rather than a
 // texture. Styled as thin glowing outline strokes (bright core + soft
@@ -24,8 +25,8 @@ Shader "StarBound/IconGlyph"
         _GlowColor("Glow Color", Color) = (0.6, 0.85, 1.0, 1)
         // Hull=0, Energy=1, Weapons=2, Shields=3, Speed=4, Money=5, Cargo=6,
         // ChevronUp=7, ChevronDown=8, LocatePin=9, ClearSpace=10,
-        // Tradelane=11, Asteroids=12, Debris=13, Mines=14 — see
-        // IconGlyphMaterials.Glyph, which this must stay in sync with.
+        // Tradelane=11, Asteroids=12, Debris=13, Mines=14, Wormhole=15 —
+        // see IconGlyphMaterials.Glyph, which this must stay in sync with.
         _Glyph("Glyph Index", Float) = 0
         _StrokeWidth("Stroke Width", Float) = 0.12
         _GlowWidth("Glow Width", Float) = 0.22
@@ -243,6 +244,22 @@ Shader "StarBound/IconGlyph"
                     spikes = min(spikes, SdfSegment(p, Rotate(float2(0.32, 0), 4.189), Rotate(float2(0.58, 0), 4.189)));
                     spikes = min(spikes, SdfSegment(p, Rotate(float2(0.32, 0), 5.236), Rotate(float2(0.58, 0), 5.236)));
                     outlineDist = min(body, spikes);
+                }
+                else if (glyph == 15) // Wormhole — a portal: two concentric rings (looking
+                                       // into the aperture) plus four short TANGENTIAL ticks
+                                       // hugging the outer ring, unlike Weapons' RADIAL ticks
+                                       // (which point straight out) — the tangential angle
+                                       // reads as spin/motion, so this doesn't land as just
+                                       // another plain two-ring "forcefield" like Shields
+                {
+                    float outer = abs(SdfCircle(p, 0.58));
+                    float inner = abs(SdfCircle(p, 0.30));
+                    float swirl = 1e5;
+                    swirl = min(swirl, SdfSegment(p, Rotate(float2(0.58, -0.14), 0.0), Rotate(float2(0.58, 0.14), 0.0)));
+                    swirl = min(swirl, SdfSegment(p, Rotate(float2(0.58, -0.14), 1.5708), Rotate(float2(0.58, 0.14), 1.5708)));
+                    swirl = min(swirl, SdfSegment(p, Rotate(float2(0.58, -0.14), 3.1416), Rotate(float2(0.58, 0.14), 3.1416)));
+                    swirl = min(swirl, SdfSegment(p, Rotate(float2(0.58, -0.14), 4.7124), Rotate(float2(0.58, 0.14), 4.7124)));
+                    outlineDist = min(outer, min(inner, swirl));
                 }
                 // Any other index: outlineDist/filledDist stay at their
                 // 1e5 default, i.e. nothing renders — safer than falling

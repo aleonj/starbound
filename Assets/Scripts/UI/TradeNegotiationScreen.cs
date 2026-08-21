@@ -137,6 +137,13 @@ namespace StarBound.UI
             int preselectedOwnMoney, int preselectedWantMoney,
             Action<IReadOnlyList<ItemDefinition>, IReadOnlyList<ItemDefinition>, int, int> onSend, Action onCancel)
         {
+            // A fresh entry into Build mode is never a continuation of
+            // whatever failure the PREVIOUS mode was showing (e.g.
+            // cancelling out of a failed Send and landing back in Review —
+            // see ShowReview's matching reset) — SetStatusMessage is only
+            // ever meant to annotate the CURRENT screen a caller is
+            // already looking at, not survive a mode switch.
+            SetStatusMessage(null);
             mode = Mode.Build;
             buildData = new BuildData
             {
@@ -163,6 +170,8 @@ namespace StarBound.UI
             int theyGiveMoney, int theyWantMoney, bool canCounter,
             Action onAccept, Action onReject, Action onCounter)
         {
+            // See ShowBuild's matching reset for why.
+            SetStatusMessage(null);
             mode = Mode.Review;
             reviewData = new ReviewData
             {

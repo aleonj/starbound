@@ -89,8 +89,6 @@ namespace StarBound.Demo
         private static readonly Color BannerCritColor = new(1f, 0.82f, 0.2f);
         private static readonly Color BannerEscapeColor = new(0.3f, 0.75f, 0.85f);
         private static readonly Color BannerInitiativeColor = new(0.6f, 0.65f, 0.95f);
-        private GUIStyle headerStyle;
-        private bool legacySkinScaled;
         private MatchHudChrome chrome;
         private EngagementScreen engagementScreen;
         private ShopScreen shopScreen;
@@ -131,11 +129,6 @@ namespace StarBound.Demo
         // field's own comment for why keying off the session INSTANCE
         // (not a visibility edge) matters.
         private TradeNegotiation trackedTradeNegotiation;
-        // The negotiation screen's own local feedback line (a failed
-        // Send/Accept's reason) — same reasoning as shopStatusMessage
-        // above (chrome is hidden behind this full-screen overlay while
-        // it's open).
-        private string tradeStatusMessage;
         // Drives which single offer's destination shows as a map waypoint
         // (see RefreshView) — replaces the old "show every offer at once"
         // behavior the story specifically called out as ambiguous. Purely
@@ -143,6 +136,21 @@ namespace StarBound.Demo
         // selection, kept here because RefreshView (which computes
         // waypoints) lives in MatchHud, not the screen.
         private JobDefinition selectedJobOffer;
+        private WormholeScreen wormholeScreen;
+        // The device-granted Wormhole-terrain die (see OnRollDiceClicked)
+        // — a synthetic RolledDie, not part of match.CurrentHand, that
+        // flows through the exact same selectedDie/ComputeLegalTargets/
+        // Move pipeline as any rolled die.
+        private RolledDie wormholeDeviceDie;
+        // The destination-picker screen (see WormholeScreen) — opens
+        // automatically the moment the player lands on Wormhole terrain
+        // (see ConfirmPendingMove), not via a persistent toggle button.
+        private bool showWormholeDestinations;
+        private bool wasWormholeDestinationsVisible;
+        // Drives which destination shows as a map waypoint (see
+        // RefreshView) — same purpose as selectedJobOffer, mirroring
+        // JobBoardScreen's own onSelectionChanged pattern.
+        private HexCoordinate? selectedWormholeDestination;
 
         public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, TurnHandoffScreen handoffScreen, WinScreen winScreen, MapCameraController cameraController, PopupDialog popupDialog, Action onNewMatch)
         {
@@ -164,7 +172,7 @@ namespace StarBound.Demo
             // the other UGUI screens — every value it shows is per-match
             // state, so it has no reason to survive across matches.
             chrome = gameObject.AddComponent<MatchHudChrome>();
-            chrome.Initialize(OnAttackClicked, OnEndTurnClicked, OnShopToggleClicked, OnJobBoardToggleClicked, OnLocatePlayerClicked, OnActiveJobActionClicked, OnHeldItemsToggleClicked, OnTradeToggleClicked);
+            chrome.Initialize(OnAttackClicked, OnEndTurnClicked, OnShopToggleClicked, OnJobBoardToggleClicked, OnLocatePlayerClicked, OnActiveJobActionClicked, OnHeldItemsToggleClicked, OnTradeClicked);
 
             // Same "created fresh per match" reasoning as chrome above —
             // every value it shows is per-engagement state.
@@ -173,6 +181,7 @@ namespace StarBound.Demo
             jobBoardScreen = gameObject.AddComponent<JobBoardScreen>();
             heldItemsPopup = gameObject.AddComponent<HeldItemsPopup>();
             tradeNegotiationScreen = gameObject.AddComponent<TradeNegotiationScreen>();
+            wormholeScreen = gameObject.AddComponent<WormholeScreen>();
 
             CreateShipMarkers();
             RefreshView();
@@ -251,47 +260,13 @@ namespace StarBound.Demo
             RefreshView();
         }
 
-        // Legacy overlay Rect for whatever's still IMGUI (only Wormhole
-        // travel now) — docked in the corner opposite the new UGUI chrome
-        // (which docks top-left) so the two can never collide regardless
-        // of chrome's actual (dynamically sized) height, and computed from
-        // Screen.width/height instead of a hardcoded box so at least this
-        // much scales with screen size too. Wormhole gets its own
-        // dedicated UGUI story soon (Order #13), so this is a deliberately
-        // temporary shape.
-        private static Rect ComputeLegacyOverlayRect() =>
-            new(Screen.width - 480f, 10f, 460f, Screen.height - 20f);
-
-        // Used by MapCameraController to reject a gesture that starts
-        // over UI, so dragging from the HUD panel never pans the map
-        // underneath it. EventSystem now covers the UGUI chrome for
-        // free; the manual Rect check below only matters for the
-        // still-IMGUI legacy overlay, which EventSystem doesn't know
-        // about at all since IMGUI isn't part of its raycasting pipeline
-        // — and only while something's actually drawn there, so an
-        // inactive overlay doesn't block map taps over empty screen space.
-        private bool IsPointerOverUi(Vector2 screenPosition)
-        {
-            if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
-                return true;
-
-            if (!IsLegacyOverlayActive())
-                return false;
-
-            var guiPosition = new Vector2(screenPosition.x, Screen.height - screenPosition.y);
-            return ComputeLegacyOverlayRect().Contains(guiPosition);
-        }
-
-        // True whenever the still-IMGUI legacy overlay (only Wormhole
-        // travel now — Shop/Job Board/Trade all moved to their own UGUI
-        // screens) is actually drawing something — used both to gate
-        // input-blocking above and to decide whether OnGUI's BeginArea
-        // should paint a background at all (see OnGUI — GUI.skin.box has
-        // its own default dark translucent fill that would otherwise
-        // render as an unexplained shadow over an empty Rect the rest of
-        // the time).
-        private bool IsLegacyOverlayActive() =>
-            match.CanTravelWormhole;
+        // Used by MapCameraController to reject a gesture that starts over
+        // UI, so dragging from the HUD panel never pans the map underneath
+        // it. Every screen is UGUI now (Wormhole was the last remaining
+        // legacy IMGUI panel — see WormholeScreen), so EventSystem alone
+        // covers all of it.
+        private bool IsPointerOverUi(Vector2 screenPosition) =>
+            EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
 
         private void ConfirmPendingMove()
         {
@@ -305,6 +280,14 @@ namespace StarBound.Demo
             {
                 lastMessage = null;
                 selectedDie = null;
+
+                // Landing on Wormhole terrain — whether via the guaranteed
+                // device die (see OnRollDiceClicked) or, same as before, a
+                // genuinely-rolled rare Wormhole face — immediately offers
+                // the destination picker as the natural next step, rather
+                // than requiring a separate action to open it.
+                if (match.Map.TryGetHex(match.CurrentPlayer.Position, out var arrivedHex) && arrivedHex.Terrain == TerrainType.Wormhole)
+                    showWormholeDestinations = true;
             }
             else
             {
@@ -332,6 +315,17 @@ namespace StarBound.Demo
         private void OnRollDiceClicked()
         {
             match.RollDice(rng);
+            // Guarantees anyone holding the device a Wormhole-terrain die
+            // this turn instead of leaving it to the random roll (see
+            // Match.CanTravelWormhole's own comment on why) — a synthetic
+            // RolledDie, not part of match.CurrentHand, that flows through
+            // the exact same selectedDie/ComputeLegalTargets/Move pipeline
+            // as any rolled die (ShipMover.TryMove already gates landing
+            // on Wormhole terrain on holding the device, so no extra check
+            // is needed here).
+            wormholeDeviceDie = match.CurrentPlayer.Ship.HeldItems.Contains(ItemPool.WormholeDevice)
+                ? new RolledDie(dieIndex: -1, TerrainType.Wormhole)
+                : null;
             lastMessage = null;
             // Tucks the stats panel away the moment dice are rolled — the
             // map is what the player needs to see next (where the roll
@@ -731,6 +725,42 @@ namespace StarBound.Demo
 
         private void OnShopCloseClicked() => showShop = false;
 
+        // Fired by WormholeScreen as the Detail-card selection changes —
+        // mirrors OnJobBoardSelectionChanged exactly: re-renders locally,
+        // then pans/flashes the map to the newly-selected destination so
+        // it's actually visible above the screen's own bottom-docked panel
+        // rather than just marked on a point the player has to go hunting
+        // for.
+        private void OnWormholeDestinationSelectionChanged(HexCoordinate? destination)
+        {
+            selectedWormholeDestination = destination;
+            RefreshView();
+
+            if (!destination.HasValue)
+                return;
+
+            cameraController.PanTo(HexLayout.AxialToWorld(destination.Value, hexRadius));
+            mapView.FlashHex(destination.Value, LocateFlashColor, LocateFlashDuration);
+        }
+
+        private void OnWormholeTravelConfirmed(HexCoordinate destination)
+        {
+            match.TravelToWormhole(destination, rng);
+            showWormholeDestinations = false;
+            selectedWormholeDestination = null;
+            lastMessage = null;
+            RefreshView();
+        }
+
+        // Declines to warp further — the player just stays on the
+        // wormhole hex they already reached and continues their turn
+        // normally (move again with another die, end turn, etc.).
+        private void OnWormholeDestinationsCloseClicked()
+        {
+            showWormholeDestinations = false;
+            selectedWormholeDestination = null;
+        }
+
         private void OnHeldItemsToggleClicked() => showHeldItems = !showHeldItems;
 
         private void OnHeldItemsCloseClicked() => showHeldItems = false;
@@ -741,14 +771,17 @@ namespace StarBound.Demo
         // Job Board's own toggle. Reads both ships' current items/money
         // live; there's no offer to roll ahead of time like Shop/Job
         // Board have.
-        private void OnTradeToggleClicked()
+        // No longer a toggle — the chrome button this fires from (see
+        // MatchHudChrome.SetTrade) only exists at all while sharing a hex
+        // with the opponent, same visible/hidden shape as Attack, and
+        // chrome itself hides the instant showTradeBuilder goes true — so
+        // there's no way to tap this same button again to back out.
+        // Closing happens through the negotiation screen's own Cancel
+        // (see OnCancelTradeBuildClicked).
+        private void OnTradeClicked()
         {
-            showTradeBuilder = !showTradeBuilder;
-            if (!showTradeBuilder)
-                return;
-
+            showTradeBuilder = true;
             tradeDeviceHolder = match.CurrentPlayer;
-            tradeStatusMessage = null;
             RefreshTradeBuildFor(match.CurrentPlayer, Array.Empty<ItemDefinition>(), Array.Empty<ItemDefinition>(), 0, 0, "Propose Trade");
         }
 
@@ -790,8 +823,8 @@ namespace StarBound.Demo
             var negotiation = match.ActiveTradeNegotiation;
             // The building player here is always the Opponent (only the
             // Opponent ever counters) — flip their own gives/wants into
-            // Initiator/Opponent terms the same way OnTradeToggleClicked's
-            // eventual Send does, just from the other side.
+            // Initiator/Opponent terms the same way OnSendTradeProposalClicked
+            // does, just from the other side.
             var result = match.CounterTrade(wantsFromOther, ownGives, wantMoney, ownMoney);
             if (!result.Success)
             {
@@ -805,9 +838,13 @@ namespace StarBound.Demo
 
         // Shared by both review moments (the Opponent reviewing the
         // original proposal, and the Initiator reviewing the one allowed
-        // counter) — Accept/Reject don't need to know which is which,
-        // only Counter (offered on the review screen itself, hidden once
-        // already countered) cares.
+        // counter) — Accept/Reject don't need to know which is which for
+        // the trade itself, only Counter (offered on the review screen
+        // itself, hidden once already countered) cares. They DO need it
+        // for the confirmation below, though: whoever's reviewing right
+        // now (tradeDeviceHolder) is the one whose answer needs reporting
+        // back — unless that's the Initiator finalizing their own
+        // decision on a counter, which needs no confirmation to itself.
         private void OnAcceptTradeClicked()
         {
             var result = match.AcceptTrade();
@@ -817,13 +854,25 @@ namespace StarBound.Demo
                 return;
             }
 
-            HandOffTradeDeviceTo(match.CurrentPlayer, "Continue Turn", RefreshView);
+            var responder = tradeDeviceHolder;
+            HandOffTradeDeviceTo(match.CurrentPlayer, "Trade Accepted — Continue", () =>
+            {
+                if (responder != match.CurrentPlayer)
+                    lastMessage = $"{responder.DisplayName} accepted your trade.";
+                RefreshView();
+            });
         }
 
         private void OnRejectTradeClicked()
         {
+            var responder = tradeDeviceHolder;
             match.RejectTrade();
-            HandOffTradeDeviceTo(match.CurrentPlayer, "Continue Turn", RefreshView);
+            HandOffTradeDeviceTo(match.CurrentPlayer, "Trade Rejected — Continue", () =>
+            {
+                if (responder != match.CurrentPlayer)
+                    lastMessage = $"{responder.DisplayName} rejected your trade.";
+                RefreshView();
+            });
         }
 
         // Switches the SAME device holder (the Opponent, already
@@ -880,7 +929,6 @@ namespace StarBound.Demo
                 ? $"Counter from {proposer.DisplayName}"
                 : $"Offer from {proposer.DisplayName}";
 
-            tradeStatusMessage = null;
             tradeNegotiationScreen.ShowReview(
                 headerLabel, theyGive, theyWant, theyGiveMoney, theyWantMoney,
                 canCounter: reviewerIsOpponent && !negotiation.HasBeenCountered,
@@ -934,6 +982,15 @@ namespace StarBound.Demo
                 OnShopUseItemClicked, OnShopSellItemClicked, OnShopTradeItemClicked,
                 match.CanUseItem, match.CanTradeWithOpponent,
                 OnShopCloseClicked);
+        }
+
+        private void RefreshWormholeDestinationsScreen()
+        {
+            var playerColor = match.CurrentPlayer == match.PlayerOne ? PlayerOneColor : PlayerTwoColor;
+            wormholeScreen.Refresh(
+                HexDisplayName(match.CurrentPlayer.Position), playerColor,
+                match.OtherWormholeDestinations.ToList(), HexDisplayName,
+                OnWormholeTravelConfirmed, OnWormholeDestinationSelectionChanged, OnWormholeDestinationsCloseClicked);
         }
 
         private static string Describe(PurchaseFailureReason reason) => reason switch
@@ -1103,6 +1160,9 @@ namespace StarBound.Demo
             showJobBoard = false;
             showHeldItems = false;
             showTradeBuilder = false;
+            showWormholeDestinations = false;
+            selectedWormholeDestination = null;
+            wormholeDeviceDie = null;
             jobOfferRolledThisTurn = false;
             lastMessage = null;
             RefreshView();
@@ -1123,8 +1183,19 @@ namespace StarBound.Demo
             if (chrome == null || match == null)
                 return;
 
+            // Moved here from the old OnGUI (now deleted along with the
+            // last legacy IMGUI panel it existed to host — see
+            // WormholeScreen) — this is the one piece of real logic OnGUI
+            // used to carry, not just a draw-order guard, so it had to be
+            // relocated rather than dropped.
+            if (!awaitingHandoff && match.IsComplete && !winScreenShown)
+            {
+                winScreenShown = true;
+                winScreen.Show(match, onNewMatch);
+            }
+
             var chromeVisible = !awaitingHandoff && !match.IsComplete && !match.IsInEngagement && !showShop && !showJobBoard &&
-                !showTradeBuilder && !match.IsNegotiatingTrade;
+                !showTradeBuilder && !match.IsNegotiatingTrade && !showWormholeDestinations;
             chrome.SetVisible(chromeVisible);
 
             // Same "explicit state-change call sites" discipline chrome's
@@ -1181,6 +1252,22 @@ namespace StarBound.Demo
                 RefreshShopScreen();
             }
             wasShopVisible = shopVisible;
+
+            // Same self-correcting, UI-only-toggle reasoning as Shop above
+            // — showWormholeDestinations is only ever set true right after
+            // a successful move onto Wormhole terrain (see
+            // ConfirmPendingMove), but this is still defensive: nothing
+            // else can normally change CanTravelWormhole while this modal
+            // is up, but every other full-screen toggle in this file
+            // self-corrects the same way.
+            if (showWormholeDestinations && !match.CanTravelWormhole)
+                showWormholeDestinations = false;
+
+            var wormholeDestinationsVisible = !awaitingHandoff && !match.IsComplete && showWormholeDestinations;
+            wormholeScreen.SetVisible(wormholeDestinationsVisible);
+            if (wormholeDestinationsVisible && !wasWormholeDestinationsVisible)
+                RefreshWormholeDestinationsScreen();
+            wasWormholeDestinationsVisible = wormholeDestinationsVisible;
 
             // Same self-correcting, UI-only-toggle reasoning as Shop
             // above — plus ActiveJob == null, since accepting a second
@@ -1270,6 +1357,7 @@ namespace StarBound.Demo
             // the map needlessly cropped underneath them.
             var reservedFraction = chromeVisible ? chrome.DiceBarReservedFraction
                 : jobBoardVisible ? jobBoardScreen.ReservedFraction
+                : wormholeDestinationsVisible ? wormholeScreen.ReservedFraction
                 : 0f;
             cameraController.SetBottomReservedFraction(reservedFraction);
 
@@ -1295,6 +1383,11 @@ namespace StarBound.Demo
                 match.ActiveGoal is { } goal ? $"Race goal: {DescribeGoal(goal)}" : null);
 
             chrome.SetAttack(match.CanAttackOpponent, $"Attack {match.OtherPlayer.DisplayName}");
+            // Same base gate as Attack (IsOnOpponentHex + budget) — see
+            // Match.CanAttackOpponent/CanProposeTrade. Sits right under
+            // Attack in chrome (see MatchHudChrome.SetTrade) since it's
+            // the other thing sharing a hex with the opponent unlocks.
+            chrome.SetTrade(match.CanProposeTrade, $"Trade with {match.OtherPlayer.DisplayName}");
             chrome.SetEndTurn(match.CanEndTurn);
 
             var canShopHere = match.IsCurrentPlayerOnPlanet && match.CanShop;
@@ -1305,10 +1398,6 @@ namespace StarBound.Demo
             // self-correction in the visibility block above).
             var canVisitJobBoardHere = match.IsCurrentPlayerOnPlanet && match.CanAcceptJob && match.CurrentPlayer.ActiveJob == null;
             chrome.SetJobBoard(canVisitJobBoardHere, showJobBoard ? "Close Job Board" : "Open Job Board");
-
-            // Same base gate as Attack (IsOnOpponentHex + budget) — see
-            // Match.CanAttackOpponent/CanProposeTrade.
-            chrome.SetTrade(match.CanAttackOpponent, showTradeBuilder ? "Close Trade" : "Open Trade");
 
             if (match.CurrentPlayer.ActiveJob is { } activeJob)
             {
@@ -1321,103 +1410,6 @@ namespace StarBound.Demo
             }
 
             chrome.SetMessage(lastMessage);
-        }
-
-        private void OnGUI()
-        {
-            // Nothing from the HUD renders at all while awaiting hand-off
-            // confirmation — guarantees the previous player's board can't
-            // leak through underneath the full-screen TurnHandoffScreen,
-            // and sidesteps any IMGUI/UGUI draw-order ambiguity entirely.
-            if (awaitingHandoff)
-                return;
-
-            // Same reasoning as the awaitingHandoff guard above — nothing
-            // from the IMGUI HUD renders once the match is over, so the
-            // full-screen WinScreen (UGUI) can't have it drawn on top.
-            if (match.IsComplete)
-            {
-                if (!winScreenShown)
-                {
-                    winScreenShown = true;
-                    winScreen.Show(match, onNewMatch);
-                }
-                return;
-            }
-
-            // Same reasoning again — nothing from the legacy IMGUI HUD
-            // renders during an engagement either, now that it has its
-            // own full-screen UGUI EngagementScreen. Not just cosmetic:
-            // legacy OnGUI content always draws on top of every UGUI
-            // Canvas regardless of sortingOrder (see MatchHudChrome's own
-            // header comment), so without this guard EngagementScreen
-            // would be invisibly stuck underneath any leftover legacy
-            // content — e.g. the Wormhole travel panel left open right
-            // before the fight triggered.
-            if (match.IsInEngagement)
-                return;
-
-            // Shop and Job Board each have their own full-screen UGUI
-            // screen now too (see RefreshShopScreen/RefreshJobBoardScreen)
-            // — same reasoning as the engagement guard above, otherwise
-            // either would be invisibly stuck underneath any leftover
-            // legacy content.
-            if (showShop)
-                return;
-            if (showJobBoard)
-                return;
-            // HeldItemsPopup is UGUI too — without this, a leftover
-            // Wormhole IMGUI panel (drawn below, independent of
-            // showShop/showJobBoard) would render on top of the popup and
-            // could steal taps meant for its Close button.
-            if (showHeldItems)
-                return;
-            // Trade has its own full-screen UGUI negotiation screen now
-            // too (see RefreshTradeBuildFor/RefreshTradeReviewFor) — same
-            // reasoning as Shop/Job Board above.
-            if (showTradeBuilder || match.IsNegotiatingTrade)
-                return;
-
-            // IMGUI has no CanvasScaler equivalent — GUI.skin's default
-            // font size is tuned for desktop pixel density and doesn't
-            // scale with the device's actual pixel ratio at all, so it
-            // renders illegibly tiny on a phone (the same physical-vs-
-            // logical scale problem the UGUI chrome had, just never
-            // fixed here since this whole region is scheduled to be
-            // replaced by a dedicated UGUI screen soon — Wormhole, Order
-            // #13, the last remaining legacy IMGUI panel). This is a
-            // deliberately rough interim bump, not a real fix.
-            if (!legacySkinScaled)
-            {
-                GUI.skin.label.fontSize = 34;
-                GUI.skin.button.fontSize = 34;
-                GUI.skin.button.padding = new RectOffset(20, 20, 14, 14);
-                legacySkinScaled = true;
-            }
-            headerStyle ??= new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, fontSize = 40 };
-
-            // GUI.skin.box paints its own dark translucent background for
-            // the whole Rect regardless of whether DrawMainPanel actually
-            // puts anything inside it — only worth that background when
-            // something's really being shown there.
-            var backgroundStyle = IsLegacyOverlayActive() ? GUI.skin.box : GUIStyle.none;
-            GUILayout.BeginArea(ComputeLegacyOverlayRect(), backgroundStyle);
-            DrawMainPanel();
-            GUILayout.EndArea();
-        }
-
-        // Shop, Job Board, and Trade's own content now live entirely in
-        // ShopScreen/JobBoardScreen/TradeNegotiationScreen (see
-        // RefreshShopScreen/RefreshJobBoardScreen/RefreshTradeBuildFor/
-        // RefreshTradeReviewFor and OnGUI's own showShop/showJobBoard/
-        // showTradeBuilder guards above) — active job tracking moved to a
-        // persistent MatchHudChrome strip (see SetActiveJob). Only
-        // Wormhole is still legacy IMGUI here, with its own pending
-        // redesign story (Order #13).
-        private void DrawMainPanel()
-        {
-            if (match.CanTravelWormhole)
-                DrawWormholeTravelPanel();
         }
 
         // Still used by DescribeVariable/DescribeGoal's callers — see
@@ -1438,33 +1430,6 @@ namespace StarBound.Demo
                 $"Defeat the marked target at ({goal.TargetHex.Q}, {goal.TargetHex.R}) (reward ${goal.RewardMoney}).",
             _ => goal.Type.ToString()
         };
-
-        // Standing movement option for anyone holding the Wormhole Device
-        // (see Match.CanTravelWormhole) — available any time during the
-        // movement phase, not just while parked on a wormhole hex. Lists
-        // every wormhole on the map as a travel target.
-        private void DrawWormholeTravelPanel()
-        {
-            GUILayout.Space(5);
-            GUILayout.Label("-- Wormhole --", headerStyle);
-
-            var destinations = match.OtherWormholeDestinations.ToList();
-            if (destinations.Count == 0)
-            {
-                GUILayout.Label("No other wormhole exists on this map yet.");
-                return;
-            }
-
-            foreach (var destination in destinations)
-            {
-                if (GUILayout.Button($"Travel to ({destination.Q}, {destination.R})"))
-                {
-                    match.TravelToWormhole(destination, rng);
-                    lastMessage = null;
-                    RefreshView();
-                }
-            }
-        }
 
         // "you"/"opponent" reads fine for an NPC fight (only one real,
         // controllable party) but is actively misleading in PvP the
@@ -1626,6 +1591,12 @@ namespace StarBound.Demo
             if (selectedJobOffer != null)
                 waypoints.Add(selectedJobOffer.Destination);
 
+            // Same "only the currently selected one" reasoning as the job
+            // offer above — set by OnWormholeDestinationSelectionChanged
+            // as WormholeScreen's own Detail card selection changes.
+            if (selectedWormholeDestination.HasValue)
+                waypoints.Add(selectedWormholeDestination.Value);
+
             if (match.ActiveGoal is { } goal)
                 highlighted.Add(goal.TargetHex);
 
@@ -1638,8 +1609,16 @@ namespace StarBound.Demo
             // existing "state changed, resync" call sites (roll, die
             // select/deselect, move confirm/cancel, end turn, mine,
             // wormhole travel, post-engagement continue, etc.).
+            IReadOnlyList<RolledDie> dice = match.CurrentHand?.Dice ?? Array.Empty<RolledDie>();
+            // The device-granted Wormhole die (see OnRollDiceClicked) is
+            // appended here rather than folded into match.CurrentHand
+            // itself — it's not part of the rolled hand, just an extra
+            // option shown alongside it, same as the story asked for.
+            if (wormholeDeviceDie != null)
+                dice = dice.Append(wormholeDeviceDie).ToList();
+
             chrome?.RefreshDiceTray(
-                match.CurrentHand?.Dice ?? Array.Empty<RolledDie>(),
+                dice,
                 selectedDie,
                 match.CurrentHand != null,
                 match.CanRollDice,

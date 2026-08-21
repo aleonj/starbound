@@ -199,19 +199,22 @@ namespace StarBound.Multiplayer
             job.Type != JobType.BountyHunting && job.Destination == CurrentPlayer.Position &&
             (job.Type != JobType.Mining || CurrentPlayer.HasMinedCargo);
 
-        // A standing movement option for anyone holding the Wormhole
-        // Device — deliberately NOT tied to standing on a wormhole hex or
-        // to having rolled a matching die: making an expensive device
-        // purchase depend on the rare Wormhole die face meant it could sit
-        // unusable for turns at a time. Without the device it's never
-        // available at all. Shares the Move session (see CanMove) since
-        // this is just another way of spending your movement, not a
-        // separate action category — free to chain with dice-based moves
-        // in either order within one continuous session.
+        // The second half of Wormhole travel — warping onward from a
+        // Wormhole hex to any other one. Reaching that first hex no longer
+        // depends on the rare rolled Wormhole die face: MatchHud grants
+        // anyone holding the device a guaranteed synthetic Wormhole-terrain
+        // die each roll (see MatchHud.OnRollDiceClicked), which flows
+        // through the exact same Move/ShipMover.TryMove pipeline as any
+        // other die (including its own WormholeDeviceRequired gate) — this
+        // property only governs what happens once they've actually landed
+        // there. Shares the Move session (see CanMove) since the whole
+        // "move onto the wormhole, then warp elsewhere" sequence is one
+        // continuous use of that turn's movement, not a separate action.
         public bool CanTravelWormhole =>
             !IsInEngagement && !IsComplete && !IsNegotiatingTrade &&
             (moveSessionPaid || actionsUsed < ActionsPerTurn) &&
-            CurrentPlayer.Ship.HeldItems.Contains(ItemPool.WormholeDevice);
+            CurrentPlayer.Ship.HeldItems.Contains(ItemPool.WormholeDevice) &&
+            Map.TryGetHex(CurrentPlayer.Position, out var currentHex) && currentHex.Terrain == TerrainType.Wormhole;
 
         public IEnumerable<HexCoordinate> OtherWormholeDestinations =>
             Map.Hexes.Where(h => h.Terrain == TerrainType.Wormhole && h.Coordinate != CurrentPlayer.Position)

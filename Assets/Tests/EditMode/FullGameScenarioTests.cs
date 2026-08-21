@@ -239,6 +239,15 @@ namespace StarBound.Tests
             var map = new GameMap(radius: 6, Difficulty.Medium);
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
             map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            // Deliberately NOT adjacent to (1, 0) — RelocateAfterEscape
+            // (see Match.ResolveActiveEngagement) relocates an escapee to
+            // a random EXISTING neighbor hex, and a wormhole hex among
+            // those candidates would make the escape itself land the
+            // player on it by chance, defeating the point of the
+            // "not on a wormhole hex yet" assertion below. (0, 0) — the
+            // only other hex adjacent to (1, 0) that actually exists in
+            // this sparse test map — is the sole candidate, so escape
+            // relocation here is deterministic regardless of seed.
             map.SetHex(new Hex(new HexCoordinate(5, 0), TerrainType.Wormhole));
             map.SetHex(new Hex(new HexCoordinate(6, 0), TerrainType.Wormhole));
 
@@ -269,15 +278,33 @@ namespace StarBound.Tests
             match.EndTurn();
             match.EndTurn();
 
-            // Travel via wormhole using the device bought earlier — from
-            // wherever the escape happened to leave the player, with no
-            // need to ever have physically reached a wormhole hex first.
+            // Escape relocated the player back to (0, 0) (see the map
+            // setup comment above — it's the only candidate). Repositioned
+            // directly here rather than walked over several turns — this
+            // part of the test is about wormhole mechanics, not about
+            // covering the distance to (5, 0), and Move() requires the
+            // player already be adjacent to whatever it targets.
+            p1.Position = new HexCoordinate(4, 0);
+
+            // Reach the wormhole hex first — ordinary movement onto
+            // Wormhole terrain still requires the device (see
+            // ShipMover.TryMove's own WormholeDeviceRequired gate), which
+            // is exactly what was bought earlier; MatchHud grants a real
+            // player a guaranteed Wormhole-terrain die for this (see
+            // OnRollDiceClicked) — this test constructs the equivalent
+            // synthetic die directly, the same way the ClearSpace move
+            // above does.
             match.RollDice(new Random(1));
-            Assert.IsTrue(match.CanTravelWormhole);
-
-            match.TravelToWormhole(new HexCoordinate(5, 0), new Random(1));
-
+            Assert.IsFalse(match.CanTravelWormhole, "Not on a wormhole hex yet.");
+            match.Move(new RolledDie(0, TerrainType.Wormhole), new HexCoordinate(5, 0), new Random(1));
             Assert.AreEqual(new HexCoordinate(5, 0), p1.Position);
+
+            // Now standing on it, the device unlocks warping onward to the
+            // other pad — same action's Move session, no extra cost.
+            Assert.IsTrue(match.CanTravelWormhole);
+            match.TravelToWormhole(new HexCoordinate(6, 0), new Random(1));
+
+            Assert.AreEqual(new HexCoordinate(6, 0), p1.Position);
         }
 
         [Test]

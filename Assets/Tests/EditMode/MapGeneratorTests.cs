@@ -230,14 +230,17 @@ namespace StarBound.Tests
         {
             // Radius 4 (Small map size) — max possible distance between
             // any two hexes is exactly 8, so satisfying the minimum is
-            // tight and depends heavily on where the first hex lands; it
-            // may not be achievable at all for a given seed. The minimum
-            // distance is a hard rule with no violating fallback (see
-            // MapGenerator.PickFarClearSpace) — placement just stops when
-            // no valid spot exists, so the map may end up with fewer
-            // wormholes than its nominal budget, even zero. What must
-            // never happen is a placed pair or cross-pair distance below
-            // the minimum.
+            // tight and depends heavily on where the first hex lands.
+            // Wormholes are placed FIRST now, before anything else claims
+            // ClearSpace (see MapGenerator.Generate), specifically so the
+            // single farthest-apart pair is always still available — and a
+            // guaranteed fallback (ForceWormholePair) steps in if the
+            // budget-respecting pass's random first pick still comes up
+            // empty, so — unlike before — the map should never end up with
+            // zero (see Generate_AlwaysProducesAtLeastOneWormholePair).
+            // What this test itself checks is narrower: whatever wormholes
+            // DO end up placed, no pair or cross-pair distance is ever
+            // below the minimum.
             var map = MapGenerator.Generate(radius: 4, Difficulty.Medium, seed);
 
             var wormholes = map.Hexes.Where(h => h.Terrain == TerrainType.Wormhole)
@@ -254,6 +257,31 @@ namespace StarBound.Tests
                         $"Wormholes at {wormholes[i]} and {wormholes[j]} are only {distance} apart.");
                 }
             }
+        }
+
+        [TestCase(0)]
+        [TestCase(1)]
+        [TestCase(2)]
+        [TestCase(3)]
+        [TestCase(4)]
+        [TestCase(5)]
+        [TestCase(6)]
+        [TestCase(7)]
+        [TestCase(8)]
+        [TestCase(9)]
+        public void Generate_AlwaysProducesAtLeastOneWormholePair(int seed)
+        {
+            // Wormhole travel is a real, player-facing feature (see
+            // Match.TravelToWormhole) — every map needs somewhere to warp
+            // to, on every size, not just the roomier ones. Radius 4
+            // (Small) is deliberately the case under test: it's the
+            // tightest fit (see the distance test above), so it's the one
+            // most likely to expose a regression in the guarantee.
+            var map = MapGenerator.Generate(radius: 4, Difficulty.Medium, seed);
+
+            var wormholeCount = map.Hexes.Count(h => h.Terrain == TerrainType.Wormhole);
+
+            Assert.GreaterOrEqual(wormholeCount, 2, "Every map should have at least one wormhole pair.");
         }
     }
 }

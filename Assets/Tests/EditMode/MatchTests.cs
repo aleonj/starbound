@@ -830,16 +830,20 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void CanTravelWormhole_TrueEvenWhenNotOnAWormholeHex()
+        public void CanTravelWormhole_FalseWhenNotOnAWormholeHex()
         {
-            // Deliberately NOT tied to standing on a wormhole hex — an
-            // expensive device purchase shouldn't be unusable for turns at
-            // a time just because the player hasn't happened to land on
-            // one. (0, 0) here is ordinary ClearSpace.
+            // Reaching a wormhole hex is now just ordinary movement —
+            // MatchHud grants a guaranteed Wormhole-terrain die each roll
+            // to anyone holding the device (see OnRollDiceClicked), which
+            // flows through the normal Move/ShipMover.TryMove pipeline
+            // (already gated on the device, independently of this
+            // property). CanTravelWormhole only governs the SECOND half —
+            // warping onward once actually standing on one. (0, 0) here is
+            // ordinary ClearSpace.
             var (match, p1, _) = BuildMatch();
             p1.Ship.TryAddItem(ItemPool.WormholeDevice);
 
-            Assert.IsTrue(match.CanTravelWormhole);
+            Assert.IsFalse(match.CanTravelWormhole);
         }
 
         [Test]
