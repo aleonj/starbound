@@ -32,6 +32,7 @@ namespace StarBound.Demo
         private static MatchSetupScreen matchSetupScreen;
         private static WinScreen winScreen;
         private static PopupDialog popupDialog;
+        private static SettingsScreen settingsScreen;
         private static MapCameraController mapCameraController;
         private static GameObject worldRoot;
         private static GameObject hudObject;
@@ -39,6 +40,7 @@ namespace StarBound.Demo
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Start()
         {
+            GameSettings.Apply();
             EnsureEventSystem();
             CreateGalaxyBackground();
             EnsureMapCameraController();
@@ -58,20 +60,29 @@ namespace StarBound.Demo
             var popupDialogObject = new GameObject("PopupDialog", typeof(PopupDialog));
             popupDialog = popupDialogObject.GetComponent<PopupDialog>();
 
+            var settingsScreenObject = new GameObject("SettingsScreen", typeof(SettingsScreen));
+            settingsScreen = settingsScreenObject.GetComponent<SettingsScreen>();
+
             ShowPreMatchFlow();
         }
 
         private static void ShowPreMatchFlow()
         {
-            modeSelectionScreen.Show(() =>
-            {
-                modeSelectionScreen.Hide();
-                matchSetupScreen.Show(mapSize =>
+            modeSelectionScreen.Show(
+                () =>
                 {
-                    matchSetupScreen.Hide();
-                    StartMatch(mapSize);
+                    modeSelectionScreen.Hide();
+                    matchSetupScreen.Show(mapSize =>
+                    {
+                        matchSetupScreen.Hide();
+                        StartMatch(mapSize);
+                    });
+                },
+                () =>
+                {
+                    modeSelectionScreen.Hide();
+                    settingsScreen.Show(ShowPreMatchFlow);
                 });
-            });
         }
 
         private static void StartMatch(MapSize mapSize)
@@ -100,7 +111,7 @@ namespace StarBound.Demo
             markersRoot.transform.SetParent(worldRoot.transform, false);
 
             hudObject = new GameObject("MatchHud", typeof(MatchHud));
-            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius, handoffScreen, winScreen, mapCameraController, popupDialog, OnNewMatchRequested);
+            hudObject.GetComponent<MatchHud>().Initialize(match, mapView, markersRoot.transform, HexRadius, handoffScreen, winScreen, mapCameraController, popupDialog, settingsScreen, OnNewMatchRequested);
 
             mapCameraController.Initialize(mapSize.ToRadius(), HexRadius);
         }

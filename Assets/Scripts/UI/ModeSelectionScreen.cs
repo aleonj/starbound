@@ -23,6 +23,7 @@ namespace StarBound.UI
         private Material panelMaterial;
         private Button passAndPlayButton;
         private Button wifiLanButton;
+        private Button settingsButton;
 
         private void Awake()
         {
@@ -32,10 +33,13 @@ namespace StarBound.UI
 
         private void LateUpdate() => ScreenChromeKit.SyncPanelSize(panelMaterial, panelRect);
 
-        public void Show(Action onPassAndPlaySelected)
+        public void Show(Action onPassAndPlaySelected, Action onSettingsSelected)
         {
             passAndPlayButton.onClick.RemoveAllListeners();
             passAndPlayButton.onClick.AddListener(() => onPassAndPlaySelected());
+
+            settingsButton.onClick.RemoveAllListeners();
+            settingsButton.onClick.AddListener(() => onSettingsSelected());
 
             background.SetActive(true);
         }
@@ -60,6 +64,10 @@ namespace StarBound.UI
             var (wifiLan, _, _) = ScreenChromeKit.CreateButton(panel.transform, "WiFi LAN — Coming Soon", ScreenChromeKit.DisabledColor,
                 interactable: false, GlassPanelMaterials.Style.Button, width: 0f, height: 52f, fontSize: 16, stretchWidth: true);
             wifiLanButton = wifiLan;
+
+            var (settings, _, _) = ScreenChromeKit.CreateButton(panel.transform, "Settings", ScreenChromeKit.AccentColor,
+                interactable: true, GlassPanelMaterials.Style.Button, width: 0f, height: 44f, fontSize: 16, stretchWidth: true);
+            settingsButton = settings;
         }
     }
 }

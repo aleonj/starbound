@@ -131,6 +131,7 @@ namespace StarBound.UI
         private Image accentBar;
         private Text turnLabelText;
         private Text headerText;
+        private Button pauseButton;
         private Button locateButton;
         private GameObject collapsibleContent;
         private Button collapseToggleButton;
@@ -216,7 +217,7 @@ namespace StarBound.UI
         // Set*() calls below so refreshing values every frame doesn't
         // also re-allocate a fresh closure and re-register a listener
         // every frame.
-        public void Initialize(Action onAttack, Action onEndTurn, Action onToggleShop, Action onToggleJobBoard, Action onLocatePlayer, Action onActiveJobAction, Action onToggleHeldItems, Action onToggleTrade)
+        public void Initialize(Action onAttack, Action onEndTurn, Action onToggleShop, Action onToggleJobBoard, Action onLocatePlayer, Action onActiveJobAction, Action onToggleHeldItems, Action onToggleTrade, Action onTogglePause)
         {
             attackButton.onClick.AddListener(() => onAttack?.Invoke());
             endTurnButton.onClick.AddListener(() => onEndTurn?.Invoke());
@@ -226,6 +227,7 @@ namespace StarBound.UI
             activeJobActionButton.onClick.AddListener(() => onActiveJobAction?.Invoke());
             heldItemsButton.onClick.AddListener(() => onToggleHeldItems?.Invoke());
             tradeButton.onClick.AddListener(() => onToggleTrade?.Invoke());
+            pauseButton.onClick.AddListener(() => onTogglePause?.Invoke());
         }
 
         public void SetVisible(bool visible)
@@ -639,7 +641,11 @@ namespace StarBound.UI
 
             // Header row, not nameColumn — stays reachable even while the
             // HUD is collapsed, which is exactly when a player who's
-            // panned away is most likely to want it.
+            // panned away (or wants to pause) is most likely to want it.
+            var (pause, _) = CreateIconButton(headerRow.transform, IconGlyphMaterials.Glyph.Pause, ToggleColor,
+                GlassPanelMaterials.Style.DieButton, size: 36f);
+            pauseButton = pause;
+
             var (locate, _) = CreateIconButton(headerRow.transform, IconGlyphMaterials.Glyph.LocatePin, ToggleColor,
                 GlassPanelMaterials.Style.DieButton, size: 36f);
             locateButton = locate;

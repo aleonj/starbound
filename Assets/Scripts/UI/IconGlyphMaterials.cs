@@ -28,7 +28,8 @@ namespace StarBound.UI
             Asteroids,
             Debris,
             Mines,
-            Wormhole
+            Wormhole,
+            Pause
         }
 
         private static readonly Dictionary<Glyph, Material> Cache = new();

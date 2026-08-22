@@ -162,6 +162,75 @@ namespace StarBound.UI
             return (button, text, material);
         }
 
+        // A standard UGUI Slider dressed in the same glass/SDF visual
+        // language as everything else here — background track + fill +
+        // handle, reusing AccentColor/DisabledColor the same way
+        // CreateButton reuses ConfirmColor/DisabledColor. Caller owns
+        // wiring slider.onValueChanged and any value-label text, same
+        // division of responsibility as CreateButton leaving onClick to
+        // its caller.
+        public static (Slider Slider, RectTransform Rect) CreateSlider(Transform parent, float width, float height, float initialValue)
+        {
+            var sliderObject = new GameObject("Slider", typeof(RectTransform), typeof(LayoutElement));
+            sliderObject.transform.SetParent(parent, false);
+            var sliderRect = sliderObject.GetComponent<RectTransform>();
+            sliderRect.sizeDelta = new Vector2(width, height);
+            var sliderLayoutElement = sliderObject.GetComponent<LayoutElement>();
+            sliderLayoutElement.preferredWidth = width;
+            sliderLayoutElement.preferredHeight = height;
+
+            var trackObject = new GameObject("Track", typeof(RectTransform), typeof(Image));
+            trackObject.transform.SetParent(sliderObject.transform, false);
+            var trackRect = trackObject.GetComponent<RectTransform>();
+            trackRect.anchorMin = new Vector2(0f, 0.35f);
+            trackRect.anchorMax = new Vector2(1f, 0.65f);
+            trackRect.offsetMin = Vector2.zero;
+            trackRect.offsetMax = Vector2.zero;
+            trackObject.GetComponent<Image>().color = DisabledColor;
+
+            var fillAreaObject = new GameObject("FillArea", typeof(RectTransform));
+            fillAreaObject.transform.SetParent(sliderObject.transform, false);
+            var fillAreaRect = fillAreaObject.GetComponent<RectTransform>();
+            fillAreaRect.anchorMin = new Vector2(0f, 0.35f);
+            fillAreaRect.anchorMax = new Vector2(1f, 0.65f);
+            fillAreaRect.offsetMin = Vector2.zero;
+            fillAreaRect.offsetMax = Vector2.zero;
+
+            var fillObject = new GameObject("Fill", typeof(RectTransform), typeof(Image));
+            fillObject.transform.SetParent(fillAreaObject.transform, false);
+            var fillRect = fillObject.GetComponent<RectTransform>();
+            fillRect.anchorMin = Vector2.zero;
+            fillRect.anchorMax = new Vector2(0f, 1f);
+            fillRect.offsetMin = Vector2.zero;
+            fillRect.offsetMax = Vector2.zero;
+            fillObject.GetComponent<Image>().color = AccentColor;
+
+            var handleAreaObject = new GameObject("HandleArea", typeof(RectTransform));
+            handleAreaObject.transform.SetParent(sliderObject.transform, false);
+            var handleAreaRect = handleAreaObject.GetComponent<RectTransform>();
+            handleAreaRect.anchorMin = Vector2.zero;
+            handleAreaRect.anchorMax = Vector2.one;
+            handleAreaRect.offsetMin = Vector2.zero;
+            handleAreaRect.offsetMax = Vector2.zero;
+
+            var handleObject = new GameObject("Handle", typeof(RectTransform), typeof(Image));
+            handleObject.transform.SetParent(handleAreaObject.transform, false);
+            var handleRect = handleObject.GetComponent<RectTransform>();
+            handleRect.sizeDelta = new Vector2(height, height);
+            handleObject.GetComponent<Image>().color = Color.white;
+
+            var slider = sliderObject.AddComponent<Slider>();
+            slider.direction = Slider.Direction.LeftToRight;
+            slider.minValue = 0f;
+            slider.maxValue = 1f;
+            slider.fillRect = fillRect;
+            slider.handleRect = handleRect;
+            slider.targetGraphic = handleObject.GetComponent<Image>();
+            slider.SetValueWithoutNotify(initialValue);
+
+            return (slider, sliderRect);
+        }
+
         // Label-above-icon+value column — same pattern as
         // MatchHudChrome.CreateStatPair, generalized for reuse by
         // TurnHandoffScreen. Only reuses glyphs already proven legible in

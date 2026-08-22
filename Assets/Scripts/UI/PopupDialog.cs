@@ -12,8 +12,13 @@ namespace StarBound.UI
     {
         // Below TurnHandoffScreen's 200 — never needs to appear during
         // turn handoff or the win screen, which are distinct app-flow
-        // phases a popup wouldn't reasonably be triggered during.
-        private const int SortingOrder = 150;
+        // phases a popup wouldn't reasonably be triggered during. Above
+        // PauseScreen's 190 (was 150, sitting BELOW Pause) — Forfeit's
+        // confirmation is invoked while Pause is still showing underneath
+        // it, and Pause has to stay up so Cancel has something to return
+        // to, so the dialog must out-rank it or it renders hidden behind
+        // an opaque screen that's still on top.
+        private const int SortingOrder = 195;
 
         private static readonly Color ConfirmColor = new(0.2f, 0.7f, 0.3f);
         private static readonly Color CancelColor = new(0.7f, 0.25f, 0.25f);
@@ -68,13 +73,23 @@ namespace StarBound.UI
 
         private void BuildUI()
         {
-            var canvasObject = new GameObject("PopupDialogCanvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            canvasObject.transform.SetParent(transform, false);
-
-            var canvas = canvasObject.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = SortingOrder;
-            canvasObject.GetComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+            // Was a hand-rolled ConstantPixelSize canvas sized in raw
+            // pixels (panel 500x300, fontSize 30/22, buttons 180x70) —
+            // never actually exercised until Forfeit became its first
+            // real caller, which is when the mismatch surfaced: on a
+            // point-scale device the dialog rendered a fraction of its
+            // intended size, the exact "1/3 the intended size on a real
+            // device" bug MatchHudChrome's own header comment already
+            // documents for this exact ConstantPixelSize-vs-point-scale
+            // mistake. Now built on ScreenChromeKit's canvas (same
+            // ScaleWithScreenSize/400x866 reference every other screen
+            // uses) with every size rescaled to match — this file
+            // predates ScreenChromeKit's extraction, which is why it
+            // still hand-rolls its own CreateText/CreateButton below
+            // rather than reusing the kit's, but the canvas/scale mode
+            // itself has to match or every screen drifts out of scale
+            // with each other again.
+            var (_, canvasRect) = ScreenChromeKit.CreateCanvas(transform, "PopupDialogCanvas", SortingOrder);
 
             // Full-screen, translucent — dims whatever's behind without
             // fully hiding it (unlike TurnHandoffScreen's opaque
@@ -83,7 +98,7 @@ namespace StarBound.UI
             // while a dialog is up, since it has an Image (raycast target
             // by default) covering the whole screen.
             background = new GameObject("DimBackground", typeof(RectTransform), typeof(Image));
-            background.transform.SetParent(canvasObject.transform, false);
+            background.transform.SetParent(canvasRect, false);
             var backgroundRect = background.GetComponent<RectTransform>();
             backgroundRect.anchorMin = Vector2.zero;
             backgroundRect.anchorMax = Vector2.one;
@@ -91,33 +106,34 @@ namespace StarBound.UI
             backgroundRect.offsetMax = Vector2.zero;
             background.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.6f);
 
-            var panel = new GameObject("Panel", typeof(RectTransform), typeof(Image), typeof(VerticalLayoutGroup));
+            var panel = new GameObject("Panel", typeof(RectTransform), typeof(Image), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
             panel.transform.SetParent(background.transform, false);
             var panelRect = panel.GetComponent<RectTransform>();
             panelRect.anchorMin = new Vector2(0.5f, 0.5f);
             panelRect.anchorMax = new Vector2(0.5f, 0.5f);
             panelRect.pivot = new Vector2(0.5f, 0.5f);
-            panelRect.sizeDelta = new Vector2(500f, 300f);
+            panelRect.sizeDelta = new Vector2(320f, panelRect.sizeDelta.y);
             panel.GetComponent<Image>().color = new Color(0.12f, 0.12f, 0.16f, 1f);
+            panel.GetComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
             var layout = panel.GetComponent<VerticalLayoutGroup>();
-            layout.spacing = 20f;
-            layout.padding = new RectOffset(24, 24, 24, 24);
+            layout.spacing = 16f;
+            layout.padding = new RectOffset(20, 20, 20, 20);
             layout.childAlignment = TextAnchor.MiddleCenter;
             layout.childForceExpandWidth = false;
             layout.childForceExpandHeight = false;
             layout.childControlWidth = true;
             layout.childControlHeight = true;
 
-            titleText = CreateText(panel.transform, fontSize: 30, height: 60f);
-            messageText = CreateText(panel.transform, fontSize: 22, height: 100f);
+            titleText = CreateText(panel.transform, fontSize: 22, height: 30f);
+            messageText = CreateText(panel.transform, fontSize: 16, height: 60f);
 
             var buttonRowObject = new GameObject("ButtonRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
             buttonRowObject.transform.SetParent(panel.transform, false);
-            buttonRowObject.GetComponent<LayoutElement>().preferredHeight = 80f;
+            buttonRowObject.GetComponent<LayoutElement>().preferredHeight = 48f;
 
             var rowLayout = buttonRowObject.GetComponent<HorizontalLayoutGroup>();
-            rowLayout.spacing = 20f;
+            rowLayout.spacing = 16f;
             rowLayout.childAlignment = TextAnchor.MiddleCenter;
             rowLayout.childForceExpandWidth = false;
             rowLayout.childForceExpandHeight = false;
@@ -135,7 +151,7 @@ namespace StarBound.UI
             textObject.transform.SetParent(parent, false);
 
             var layoutElement = textObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 460f;
+            layoutElement.preferredWidth = 280f;
             layoutElement.preferredHeight = height;
 
             var text = textObject.GetComponent<Text>();
@@ -153,12 +169,12 @@ namespace StarBound.UI
         {
             var buttonObject = new GameObject(label + "Button", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
             buttonObject.transform.SetParent(parent, false);
-            buttonObject.GetComponent<RectTransform>().sizeDelta = new Vector2(180f, 70f);
+            buttonObject.GetComponent<RectTransform>().sizeDelta = new Vector2(130f, 48f);
             buttonObject.GetComponent<Image>().color = color;
 
             var layoutElement = buttonObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 180f;
-            layoutElement.preferredHeight = 70f;
+            layoutElement.preferredWidth = 130f;
+            layoutElement.preferredHeight = 48f;
 
             var textObject = new GameObject("Label", typeof(RectTransform), typeof(Text));
             textObject.transform.SetParent(buttonObject.transform, false);
@@ -173,7 +189,7 @@ namespace StarBound.UI
             text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             text.alignment = TextAnchor.MiddleCenter;
             text.color = Color.white;
-            text.fontSize = 26;
+            text.fontSize = 16;
 
             return buttonObject.GetComponent<Button>();
         }

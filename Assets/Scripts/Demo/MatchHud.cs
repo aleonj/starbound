@@ -152,7 +152,18 @@ namespace StarBound.Demo
         // JobBoardScreen's own onSelectionChanged pattern.
         private HexCoordinate? selectedWormholeDestination;
 
-        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, TurnHandoffScreen handoffScreen, WinScreen winScreen, MapCameraController cameraController, PopupDialog popupDialog, Action onNewMatch)
+        private PauseScreen pauseScreen;
+        // Shared across matches (see Initialize/DemoBootstrap), unlike
+        // pauseScreen — nothing it shows is per-match state.
+        private SettingsScreen settingsScreen;
+        private bool showPause;
+        // Suppresses pauseScreen's own visibility while the shared
+        // SettingsScreen is showing on top of it, without discarding
+        // showPause itself — Settings' Back button returns to Pause, not
+        // all the way to the board.
+        private bool inPauseSettings;
+
+        public void Initialize(Match match, MapView mapView, Transform markersParent, float hexRadius, TurnHandoffScreen handoffScreen, WinScreen winScreen, MapCameraController cameraController, PopupDialog popupDialog, SettingsScreen settingsScreen, Action onNewMatch)
         {
             this.match = match;
             this.mapView = mapView;
@@ -162,6 +173,7 @@ namespace StarBound.Demo
             this.winScreen = winScreen;
             this.cameraController = cameraController;
             this.popupDialog = popupDialog;
+            this.settingsScreen = settingsScreen;
             this.onNewMatch = onNewMatch;
             rng = new Random();
 
@@ -172,7 +184,7 @@ namespace StarBound.Demo
             // the other UGUI screens — every value it shows is per-match
             // state, so it has no reason to survive across matches.
             chrome = gameObject.AddComponent<MatchHudChrome>();
-            chrome.Initialize(OnAttackClicked, OnEndTurnClicked, OnShopToggleClicked, OnJobBoardToggleClicked, OnLocatePlayerClicked, OnActiveJobActionClicked, OnHeldItemsToggleClicked, OnTradeClicked);
+            chrome.Initialize(OnAttackClicked, OnEndTurnClicked, OnShopToggleClicked, OnJobBoardToggleClicked, OnLocatePlayerClicked, OnActiveJobActionClicked, OnHeldItemsToggleClicked, OnTradeClicked, OnPauseToggleClicked);
 
             // Same "created fresh per match" reasoning as chrome above —
             // every value it shows is per-engagement state.
@@ -182,6 +194,12 @@ namespace StarBound.Demo
             heldItemsPopup = gameObject.AddComponent<HeldItemsPopup>();
             tradeNegotiationScreen = gameObject.AddComponent<TradeNegotiationScreen>();
             wormholeScreen = gameObject.AddComponent<WormholeScreen>();
+
+            // Same "created fresh per match" reasoning — Forfeit needs a
+            // live match reference, unlike settingsScreen (shared, passed
+            // in above), which has no per-match state at all.
+            pauseScreen = gameObject.AddComponent<PauseScreen>();
+            pauseScreen.Initialize(OnResumeClicked, OnPauseSettingsClicked, OnForfeitClicked);
 
             CreateShipMarkers();
             RefreshView();
@@ -1151,6 +1169,29 @@ namespace StarBound.Demo
             mapView.FlashHex(match.CurrentPlayer.Position, LocateFlashColor, LocateFlashDuration);
         }
 
+        private void OnPauseToggleClicked() => showPause = !showPause;
+
+        private void OnResumeClicked() => showPause = false;
+
+        private void OnPauseSettingsClicked()
+        {
+            inPauseSettings = true;
+            settingsScreen.Show(() => inPauseSettings = false);
+        }
+
+        private void OnForfeitClicked()
+        {
+            popupDialog.ShowConfirmation(
+                "Forfeit Match?",
+                $"{match.OtherPlayer.DisplayName} will win. This can't be undone.",
+                "Forfeit",
+                () =>
+                {
+                    match.Forfeit();
+                    showPause = false;
+                });
+        }
+
         private void OnEndTurnClicked()
         {
             match.EndTurn();
@@ -1195,8 +1236,16 @@ namespace StarBound.Demo
             }
 
             var chromeVisible = !awaitingHandoff && !match.IsComplete && !match.IsInEngagement && !showShop && !showJobBoard &&
-                !showTradeBuilder && !match.IsNegotiatingTrade && !showWormholeDestinations;
+                !showTradeBuilder && !match.IsNegotiatingTrade && !showWormholeDestinations && !showPause;
             chrome.SetVisible(chromeVisible);
+
+            // Pause is a UI-only toggle sitting above every other in-match
+            // screen (see PauseScreen's SortingOrder) — inPauseSettings
+            // suppresses it (without clearing showPause) while the shared
+            // SettingsScreen covers it, same "temporarily hidden, not
+            // closed" shape as a nested Detail card elsewhere.
+            var pauseVisible = !awaitingHandoff && !match.IsComplete && showPause && !inPauseSettings;
+            pauseScreen.SetVisible(pauseVisible);
 
             // Same "explicit state-change call sites" discipline chrome's
             // dice tray already uses — refreshed once on the frame the
@@ -1206,7 +1255,7 @@ namespace StarBound.Demo
             // mid-fight hand-off too — handoffScreen (a higher
             // sortingOrder) already covers it, but this also stops it
             // refreshing/rebuilding buttons underneath that hand-off.
-            var engagementVisible = !awaitingHandoff && !match.IsComplete && match.IsInEngagement && !awaitingEngagementHandoff;
+            var engagementVisible = !awaitingHandoff && !match.IsComplete && match.IsInEngagement && !awaitingEngagementHandoff && !showPause;
             engagementScreen.SetVisible(engagementVisible);
 
             // A new engagement always starts with whoever's own match turn
@@ -1244,7 +1293,7 @@ namespace StarBound.Demo
             if (showShop && !(match.IsCurrentPlayerOnPlanet && match.CanShop))
                 showShop = false;
 
-            var shopVisible = !awaitingHandoff && !match.IsComplete && showShop;
+            var shopVisible = !awaitingHandoff && !match.IsComplete && showShop && !showPause;
             shopScreen.SetVisible(shopVisible);
             if (shopVisible && !wasShopVisible)
             {
@@ -1263,7 +1312,7 @@ namespace StarBound.Demo
             if (showWormholeDestinations && !match.CanTravelWormhole)
                 showWormholeDestinations = false;
 
-            var wormholeDestinationsVisible = !awaitingHandoff && !match.IsComplete && showWormholeDestinations;
+            var wormholeDestinationsVisible = !awaitingHandoff && !match.IsComplete && showWormholeDestinations && !showPause;
             wormholeScreen.SetVisible(wormholeDestinationsVisible);
             if (wormholeDestinationsVisible && !wasWormholeDestinationsVisible)
                 RefreshWormholeDestinationsScreen();
@@ -1277,7 +1326,7 @@ namespace StarBound.Demo
             if (showJobBoard && !(match.IsCurrentPlayerOnPlanet && match.CanAcceptJob && match.CurrentPlayer.ActiveJob == null))
                 showJobBoard = false;
 
-            var jobBoardVisible = !awaitingHandoff && !match.IsComplete && showJobBoard;
+            var jobBoardVisible = !awaitingHandoff && !match.IsComplete && showJobBoard && !showPause;
             jobBoardScreen.SetVisible(jobBoardVisible);
             if (jobBoardVisible && !wasJobBoardVisible)
             {
@@ -1302,7 +1351,7 @@ namespace StarBound.Demo
             // EngagementScreen's own comment on why rebuilding Button
             // GameObjects every frame is unsafe) since nothing else can
             // change HeldItems while this popup is the only thing open.
-            var heldItemsVisible = !awaitingHandoff && !match.IsComplete && showHeldItems;
+            var heldItemsVisible = !awaitingHandoff && !match.IsComplete && showHeldItems && !showPause;
             heldItemsPopup.SetVisible(heldItemsVisible);
             if (heldItemsVisible && !wasHeldItemsVisible)
             {
@@ -1339,7 +1388,7 @@ namespace StarBound.Demo
                     tradeDeviceHolder = activeNegotiation.Initiator;
             }
 
-            var tradeNegotiationVisible = !awaitingHandoff && !match.IsComplete && !awaitingTradeHandoff &&
+            var tradeNegotiationVisible = !awaitingHandoff && !match.IsComplete && !awaitingTradeHandoff && !showPause &&
                 (showTradeBuilder || match.IsNegotiatingTrade);
             tradeNegotiationScreen.SetVisible(tradeNegotiationVisible);
 

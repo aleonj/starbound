@@ -764,6 +764,17 @@ namespace StarBound.Multiplayer
             TurnNumber++;
         }
 
+        // No engagement/negotiation guard needed — unlike EndTurn, the
+        // Pause menu this is reached from is itself unreachable whenever
+        // either is active (chrome hides then, same as every other
+        // in-match screen), so those states can't coincide with a call
+        // here.
+        public void Forfeit()
+        {
+            EnsureMatchInProgress();
+            Winner = OtherPlayer;
+        }
+
         // Picks a random neighboring hex with no engagement marker of its
         // own — landing straight back into another ambush would defeat the
         // point of escaping. Leaves the player in place if every neighbor

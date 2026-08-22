@@ -25,8 +25,9 @@ Shader "StarBound/IconGlyph"
         _GlowColor("Glow Color", Color) = (0.6, 0.85, 1.0, 1)
         // Hull=0, Energy=1, Weapons=2, Shields=3, Speed=4, Money=5, Cargo=6,
         // ChevronUp=7, ChevronDown=8, LocatePin=9, ClearSpace=10,
-        // Tradelane=11, Asteroids=12, Debris=13, Mines=14, Wormhole=15 —
-        // see IconGlyphMaterials.Glyph, which this must stay in sync with.
+        // Tradelane=11, Asteroids=12, Debris=13, Mines=14, Wormhole=15,
+        // Pause=16 — see IconGlyphMaterials.Glyph, which this must stay in
+        // sync with.
         _Glyph("Glyph Index", Float) = 0
         _StrokeWidth("Stroke Width", Float) = 0.12
         _GlowWidth("Glow Width", Float) = 0.22
@@ -260,6 +261,16 @@ Shader "StarBound/IconGlyph"
                     swirl = min(swirl, SdfSegment(p, Rotate(float2(0.58, -0.14), 3.1416), Rotate(float2(0.58, 0.14), 3.1416)));
                     swirl = min(swirl, SdfSegment(p, Rotate(float2(0.58, -0.14), 4.7124), Rotate(float2(0.58, 0.14), 4.7124)));
                     outlineDist = min(outer, min(inner, swirl));
+                }
+                else if (glyph == 16) // Pause — two solid vertical bars, the
+                                       // universal pause symbol. Filled (like
+                                       // Hull), not outlined — two thin
+                                       // outlined rectangles at icon size
+                                       // would read as hollow rings, not bars
+                {
+                    filledDist = min(
+                        SdfRoundedBox(p - float2(-0.30, 0.0), float2(0.18, 0.58), 0.06),
+                        SdfRoundedBox(p - float2(0.30, 0.0), float2(0.18, 0.58), 0.06));
                 }
                 // Any other index: outlineDist/filledDist stay at their
                 // 1e5 default, i.e. nothing renders — safer than falling
