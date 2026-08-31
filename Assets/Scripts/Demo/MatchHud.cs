@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -63,9 +64,23 @@ namespace StarBound.Demo
 
         private GameObject playerOneMarker;
         private GameObject playerTwoMarker;
+        // Active eased marker glides, if any — see UpdateShipMarkers/
+        // AnimateMarkerTo. Coroutines on this MonoBehaviour, so a new
+        // match (which destroys and recreates the whole MatchHud object)
+        // cleans these up for free — no explicit reset needed.
+        private const float MarkerEaseDuration = 0.35f;
+        private Coroutine p1MarkerRoutine;
+        private Coroutine p2MarkerRoutine;
 
         private RolledDie selectedDie;
         private HexCoordinate? pendingTarget;
+        // True for exactly the one RefreshView call right after a roll —
+        // tells chrome's dice tray to tumble the newly-revealed dice
+        // instead of just rendering them (every other RefreshView call,
+        // e.g. select/deselect/confirm/end-turn, re-renders the same
+        // dice with no animation). Consumed and reset at the end of
+        // RefreshView so it can never leak into a later, unrelated call.
+        private bool justRolled;
         private bool showShop;
         private IReadOnlyList<ItemDefinition> shopOffer = Array.Empty<ItemDefinition>();
         private bool showJobBoard;
@@ -350,6 +365,7 @@ namespace StarBound.Demo
             // can actually take them), same reasoning as the locate
             // button already living outside the collapsible content.
             chrome.Collapse();
+            justRolled = true;
             RefreshView();
         }
 
@@ -1596,17 +1612,67 @@ namespace StarBound.Demo
             playerTwoMarker = new GameObject("Player Two Ship", typeof(ShipMarkerView));
             playerTwoMarker.transform.SetParent(markersParent, false);
             playerTwoMarker.GetComponent<ShipMarkerView>().Initialize(hexRadius * 0.3f, PlayerTwoColor, hullStyle: 1);
+
+            // Snap straight to the starting positions — UpdateShipMarkers
+            // (called from every RefreshView) always eases from wherever
+            // the marker currently sits, which would otherwise slide both
+            // markers in from the map origin on the very first frame.
+            var (p1Target, p2Target) = ComputeMarkerTargets();
+            playerOneMarker.transform.localPosition = p1Target;
+            playerTwoMarker.transform.localPosition = p2Target;
+        }
+
+        private (Vector3 P1, Vector3 P2) ComputeMarkerTargets()
+        {
+            var offset = hexRadius * 0.3f;
+            var p1 = HexLayout.AxialToWorld(match.PlayerOne.Position, hexRadius) + new Vector3(-offset, offset * 0.6f, -0.02f);
+            var p2 = HexLayout.AxialToWorld(match.PlayerTwo.Position, hexRadius) + new Vector3(offset, -offset * 0.6f, -0.02f);
+            return (p1, p2);
         }
 
         private void UpdateShipMarkers()
         {
-            var offset = hexRadius * 0.3f;
-            var p1Center = HexLayout.AxialToWorld(match.PlayerOne.Position, hexRadius);
-            var p2Center = HexLayout.AxialToWorld(match.PlayerTwo.Position, hexRadius);
-
-            playerOneMarker.transform.localPosition = p1Center + new Vector3(-offset, offset * 0.6f, -0.02f);
-            playerTwoMarker.transform.localPosition = p2Center + new Vector3(offset, -offset * 0.6f, -0.02f);
+            var (p1Target, p2Target) = ComputeMarkerTargets();
+            AnimateMarkerTo(playerOneMarker.transform, p1Target, ref p1MarkerRoutine);
+            AnimateMarkerTo(playerTwoMarker.transform, p2Target, ref p2MarkerRoutine);
         }
+
+        // UpdateShipMarkers runs on every RefreshView — most calls (die
+        // select/deselect, roll, end turn, etc.) leave positions
+        // unchanged, so this only actually starts a glide when the
+        // target genuinely moved, and retargets (rather than stacking) an
+        // already-running one for a chained multi-die move within the
+        // same action.
+        private void AnimateMarkerTo(Transform markerTransform, Vector3 target, ref Coroutine routine)
+        {
+            if (markerTransform.localPosition == target)
+                return;
+
+            if (routine != null)
+                StopCoroutine(routine);
+            routine = StartCoroutine(AnimateMarkerRoutine(markerTransform, target));
+        }
+
+        private IEnumerator AnimateMarkerRoutine(Transform markerTransform, Vector3 target)
+        {
+            var start = markerTransform.localPosition;
+            var elapsed = 0f;
+            while (elapsed < MarkerEaseDuration)
+            {
+                elapsed += Time.deltaTime;
+                var t = EaseOutCubic(Mathf.Clamp01(elapsed / MarkerEaseDuration));
+                markerTransform.localPosition = Vector3.Lerp(start, target, t);
+                yield return null;
+            }
+
+            markerTransform.localPosition = target;
+        }
+
+        // Same ease-out-cubic shape as MapCameraController's own copy —
+        // duplicated rather than shared since there's no existing shared
+        // "easing" utility in the project and these are the only two
+        // users so far.
+        private static float EaseOutCubic(float t) => 1f - Mathf.Pow(1f - t, 3f);
 
         private void RefreshView()
         {
@@ -1672,11 +1738,13 @@ namespace StarBound.Demo
                 match.CurrentHand != null,
                 match.CanRollDice,
                 match.CanMove,
+                justRolled,
                 pendingTarget.HasValue ? "Confirm this move?" : null,
                 OnRollDiceClicked,
                 OnDieClicked,
                 ConfirmPendingMove,
                 CancelPendingMove);
+            justRolled = false;
         }
 
         private List<HexCoordinate> ComputeLegalTargets(RolledDie die)

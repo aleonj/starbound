@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -61,6 +62,47 @@ namespace StarBound.UI
         // under its icon too. The extra height is for that label.
         private const float DieButtonHeight = 70f;
         private const float DiceRowSpacing = 8f;
+
+        // A freshly-rolled die's icon rapidly cycles through random
+        // terrain glyphs while physically wobbling, decelerating into its
+        // real result the way a real die settles rather than a flat-
+        // speed flicker, then overshoots and springs back to rest — see
+        // RefreshDiceTray's justRolled param / CreateDieButton /
+        // DieTumbleRoutine. Only ever runs for dice revealed by an actual
+        // roll (see MatchHud.justRolled) — every other RefreshDiceTray
+        // call (select/deselect, confirm/cancel, end turn) re-renders the
+        // same dice with no animation. First cut of this (a fixed-speed
+        // glyph swap + a small linear scale-down) tested as too subtle to
+        // notice — this version trades subtlety for a clearer "something
+        // just happened" read.
+        private const float DieTumbleBaseInterval = 0.045f;
+        // Each successive glyph swap takes longer than the last — a
+        // spinning wheel slowing down, not a constant-rate flicker.
+        private const float DieTumbleAcceleration = 1.35f;
+        private const int DieTumbleCycles = 6;
+        // Peak rotation of the shake, decaying to 0 as the tumble winds
+        // down — kept modest (not e.g. 20°+) so a 48pt-wide die at full
+        // tilt doesn't visibly intrude on its 8pt-gap neighbors.
+        private const float DieTumbleWobbleDegrees = 9f;
+        private const float DieTumbleWobbleFrequency = 24f;
+        // Slight per-die delay so a roll's dice don't all cycle/settle in
+        // perfect lockstep — reads more like independent dice landing.
+        private const float DieTumbleStagger = 0.05f;
+        private const float DieSettleDuration = 0.22f;
+        // Overshoots this far past 1.0 before the damped-cosine spring in
+        // DieTumbleRoutine settles it back — a firmer "landing" than a
+        // monotonic scale-down.
+        private const float DieSettlePunchScale = 1.4f;
+        // Only terrain glyphs a die can actually show — see TerrainGlyph.
+        private static readonly IconGlyphMaterials.Glyph[] TumbleGlyphs =
+        {
+            IconGlyphMaterials.Glyph.ClearSpace,
+            IconGlyphMaterials.Glyph.Tradelane,
+            IconGlyphMaterials.Glyph.Asteroids,
+            IconGlyphMaterials.Glyph.Debris,
+            IconGlyphMaterials.Glyph.Mines,
+            IconGlyphMaterials.Glyph.Wormhole
+        };
 
         // 5 * DieButtonWidth + 4 * DiceRowSpacing + 2 * panel padding —
         // the panel is sized to exactly fit the dice row, which is why
@@ -419,7 +461,7 @@ namespace StarBound.UI
         // selection, move eligibility, or pending move actually changes.
         public void RefreshDiceTray(
             IReadOnlyList<RolledDie> dice, RolledDie selectedDie, bool hasHand, bool canRoll, bool canMove,
-            string pendingMoveLabel, Action onRoll, Action<RolledDie> onDieClicked,
+            bool justRolled, string pendingMoveLabel, Action onRoll, Action<RolledDie> onDieClicked,
             Action onConfirmMove, Action onCancelMove)
         {
             // DestroyImmediate, not Destroy — Destroy defers actual
@@ -477,35 +519,124 @@ namespace StarBound.UI
             if (!canMove)
             {
                 diceInstructionText.text = "No actions left to move with this turn.";
+                var noMoveIndex = 0;
                 foreach (var die in dice)
-                    CreateDieButton(die, SpentDieColor, interactable: false, onDieClicked: null);
+                {
+                    CreateDieButton(die, SpentDieColor, interactable: false, onDieClicked: null, tumble: false, noMoveIndex);
+                    noMoveIndex++;
+                }
                 return;
             }
 
             diceInstructionText.text = "Pick a die, then tap a highlighted hex on the map.";
+            var dieIndex = 0;
             foreach (var die in dice)
             {
                 if (die.IsSpent)
                 {
-                    CreateDieButton(die, SpentDieColor, interactable: false, onDieClicked: null);
+                    CreateDieButton(die, SpentDieColor, interactable: false, onDieClicked: null, tumble: false, dieIndex);
+                    dieIndex++;
                     continue;
                 }
 
                 var color = die == selectedDie ? SelectedDieColor : IdleDieColor;
-                CreateDieButton(die, color, true, onDieClicked);
+                CreateDieButton(die, color, true, onDieClicked, justRolled, dieIndex);
+                dieIndex++;
             }
         }
 
-        private void CreateDieButton(RolledDie die, Color color, bool interactable, Action<RolledDie> onDieClicked)
+        private void CreateDieButton(RolledDie die, Color color, bool interactable, Action<RolledDie> onDieClicked, bool tumble, int dieIndex)
         {
-            var (dieButton, _) = CreateIconButton(diceButtonRow, TerrainGlyph(die.Terrain), color,
+            var (dieButton, dieIcon) = CreateIconButton(diceButtonRow, TerrainGlyph(die.Terrain), color,
                 GlassPanelMaterials.Style.DieButton, DieButtonWidth, interactable, DieIconPaddingFraction,
                 TerrainAbbreviation(die.Terrain), DieButtonHeight);
-            if (onDieClicked == null)
-                return;
+            if (onDieClicked != null)
+            {
+                var capturedDie = die;
+                dieButton.onClick.AddListener(() => onDieClicked.Invoke(capturedDie));
+            }
 
-            var capturedDie = die;
-            dieButton.onClick.AddListener(() => onDieClicked.Invoke(capturedDie));
+            if (tumble)
+                StartCoroutine(DieTumbleRoutine(dieIcon, dieButton.transform, TerrainGlyph(die.Terrain), dieIndex * DieTumbleStagger));
+        }
+
+        // Cycles the icon through random terrain glyphs while the whole
+        // button physically wobbles, both decelerating together into the
+        // real result, then springs from an overshot scale back to rest
+        // — see the constants above for timing. A single per-frame loop
+        // (not nested WaitForSeconds per cycle, like the first cut of
+        // this) so the wobble can update smoothly every frame while the
+        // glyph itself only visibly changes at each (growing) swap
+        // interval. IconGlyphMaterials.Get returns a shared, cached
+        // Material per glyph (not a fresh instance), so reassigning
+        // icon.material every swap is just a reference swap, not an
+        // allocation. Guards every step against the icon/button having
+        // been destroyed mid-coroutine (RefreshDiceTray rebuilding the
+        // whole row again before this one finishes, e.g. a very fast
+        // second click) — Unity's overridden null check catches that
+        // safely, where touching a destroyed Object's members directly
+        // would throw.
+        private IEnumerator DieTumbleRoutine(Image icon, Transform buttonTransform, IconGlyphMaterials.Glyph finalGlyph, float startDelay)
+        {
+            if (startDelay > 0f)
+                yield return new WaitForSeconds(startDelay);
+
+            var totalDuration = 0f;
+            var interval = DieTumbleBaseInterval;
+            for (var i = 0; i < DieTumbleCycles; i++)
+            {
+                totalDuration += interval;
+                interval *= DieTumbleAcceleration;
+            }
+
+            var elapsed = 0f;
+            var nextSwapAt = 0f;
+            var swapInterval = DieTumbleBaseInterval;
+            while (elapsed < totalDuration)
+            {
+                if (icon == null || buttonTransform == null)
+                    yield break;
+
+                if (elapsed >= nextSwapAt)
+                {
+                    icon.material = IconGlyphMaterials.Get(TumbleGlyphs[UnityEngine.Random.Range(0, TumbleGlyphs.Length)]);
+                    nextSwapAt += swapInterval;
+                    swapInterval *= DieTumbleAcceleration;
+                }
+
+                // Wobble amplitude decays to 0 as the tumble winds down,
+                // so the die visibly settles flat rather than snapping
+                // still mid-shake.
+                var progress = elapsed / totalDuration;
+                var wobble = Mathf.Sin(elapsed * DieTumbleWobbleFrequency) * DieTumbleWobbleDegrees * (1f - progress);
+                buttonTransform.localRotation = Quaternion.Euler(0f, 0f, wobble);
+
+                elapsed += Time.deltaTime;
+                yield return null;
+            }
+
+            if (icon == null || buttonTransform == null)
+                yield break;
+            icon.material = IconGlyphMaterials.Get(finalGlyph);
+            buttonTransform.localRotation = Quaternion.identity;
+
+            var settleElapsed = 0f;
+            while (settleElapsed < DieSettleDuration)
+            {
+                if (buttonTransform == null)
+                    yield break;
+                settleElapsed += Time.deltaTime;
+                var t = Mathf.Clamp01(settleElapsed / DieSettleDuration);
+                // Damped cosine: overshoots past 1.0, dips slightly
+                // under, converges to exactly 1.0 by t=1 — a spring
+                // settle rather than a straight decay.
+                var scale = 1f + (DieSettlePunchScale - 1f) * (1f - t) * Mathf.Cos(t * Mathf.PI * 2.5f);
+                buttonTransform.localScale = Vector3.one * scale;
+                yield return null;
+            }
+
+            if (buttonTransform != null)
+                buttonTransform.localScale = Vector3.one;
         }
 
         // Every terrain a die can actually show — Planet never appears on

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -30,6 +31,9 @@ namespace StarBound.Map
         // tune after trying it, same as every other feel-based constant in
         // this project.
         private const float ScrollZoomSpeed = 0.01f;
+        // How long an eased PanTo takes to glide to its destination — see
+        // PanTo's own comment for why this replaced an instant jump.
+        private const float PanEaseDuration = 0.4f;
 
         // Fired the instant a completed gesture qualifies as a tap (press
         // + release under the drag threshold), not polled — a polled flag
@@ -65,6 +69,9 @@ namespace StarBound.Map
         // to disambiguate, so it doesn't need the threshold machinery.
         private bool middleDragActive;
         private Vector2 lastMiddleDragPosition;
+
+        // Active eased PanTo, if any — see PanTo/CancelPan.
+        private Coroutine panRoutine;
 
         private void Awake()
         {
@@ -123,6 +130,11 @@ namespace StarBound.Map
             CancelPrimaryPointer();
             pinchActive = false;
             middleDragActive = false;
+            // The camera GameObject persists across matches (re-
+            // Initialize'd, not recreated) — a pan left over from the
+            // previous match would otherwise fight the position reset
+            // just above.
+            CancelPan();
         }
 
         private void Update()
@@ -271,6 +283,10 @@ namespace StarBound.Map
 
         private void ApplyPan(Vector2 fromScreen, Vector2 toScreen)
         {
+            // Manual input always wins over an in-flight PanTo — without
+            // this, a player dragging mid-glide would fight the
+            // coroutine's own position writes every frame.
+            CancelPan();
             var distanceFromCamera = Mathf.Abs(orthoCamera.transform.position.z);
             var fromWorld = orthoCamera.ScreenToWorldPoint(new Vector3(fromScreen.x, fromScreen.y, distanceFromCamera));
             var toWorld = orthoCamera.ScreenToWorldPoint(new Vector3(toScreen.x, toScreen.y, distanceFromCamera));
@@ -296,6 +312,9 @@ namespace StarBound.Map
         // does. Same ScreenToWorldPoint-diff technique as ApplyPan.
         private void ApplyZoomDelta(float sizeDelta, Vector2 anchorScreenPosition)
         {
+            // Same reasoning as ApplyPan's own CancelPan call — a pinch/
+            // scroll mid-glide shouldn't fight an in-flight PanTo either.
+            CancelPan();
             var distanceFromCamera = Mathf.Abs(orthoCamera.transform.position.z);
             var anchorScreenPoint = new Vector3(anchorScreenPosition.x, anchorScreenPosition.y, distanceFromCamera);
             var worldBefore = orthoCamera.ScreenToWorldPoint(anchorScreenPoint);
@@ -350,22 +369,51 @@ namespace StarBound.Map
             orthoCamera.rect = new Rect(0f, fraction, 1f, 1f - fraction);
         }
 
-        // Instant recenter — e.g. a "locate my ship" HUD button. Reuses
-        // the same ClampPosition every pan/zoom mutator above already
-        // goes through, so this can never place the camera outside the
-        // map's established pan bounds. Deliberately instant rather than
-        // animated — this project has no Lerp/coroutine-driven camera
-        // movement anywhere yet, and a smooth pan isn't needed here since
-        // the destination hex flashes on its own (see MapView.FlashHex)
-        // to draw the eye once the camera lands.
+        // Eased recenter — e.g. a "locate my ship" HUD button, turn hand-
+        // off, or a selected job/wormhole destination. Reuses the same
+        // ClampPosition every pan/zoom mutator above already goes
+        // through (applied every step of the glide, not just the final
+        // frame), so this can never place the camera outside the map's
+        // established pan bounds. Any manual pan/zoom cancels an
+        // in-flight glide (see ApplyPan/ApplyZoomDelta) rather than
+        // fighting it.
         public void PanTo(Vector3 worldPosition)
         {
-            var position = orthoCamera.transform.position;
-            position.x = worldPosition.x;
-            position.y = worldPosition.y;
-            orthoCamera.transform.position = position;
-            ClampPosition();
+            CancelPan();
+            var target = new Vector3(worldPosition.x, worldPosition.y, orthoCamera.transform.position.z);
+            panRoutine = StartCoroutine(PanToRoutine(target));
         }
+
+        private IEnumerator PanToRoutine(Vector3 target)
+        {
+            var start = orthoCamera.transform.position;
+            var elapsed = 0f;
+            while (elapsed < PanEaseDuration)
+            {
+                elapsed += Time.deltaTime;
+                var t = EaseOutCubic(Mathf.Clamp01(elapsed / PanEaseDuration));
+                orthoCamera.transform.position = Vector3.Lerp(start, target, t);
+                ClampPosition();
+                yield return null;
+            }
+
+            orthoCamera.transform.position = target;
+            ClampPosition();
+            panRoutine = null;
+        }
+
+        private void CancelPan()
+        {
+            if (panRoutine == null)
+                return;
+            StopCoroutine(panRoutine);
+            panRoutine = null;
+        }
+
+        // Ease-out (fast start, gentle settle) — matches the "arrival"
+        // feel used for ship movement too (see MatchHud's own copy of
+        // this curve), not a linear glide.
+        private static float EaseOutCubic(float t) => 1f - Mathf.Pow(1f - t, 3f);
 
         private bool IsBlocked(Vector2 screenPosition) => inputBlocker != null && inputBlocker(screenPosition);
     }

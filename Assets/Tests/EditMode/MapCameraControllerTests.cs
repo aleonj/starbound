@@ -1,7 +1,9 @@
+using System.Collections;
 using System.Reflection;
 using NUnit.Framework;
 using StarBound.Map;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace StarBound.Tests
 {
@@ -38,6 +40,25 @@ namespace StarBound.Tests
         private static readonly FieldInfo MaxOrthoSizeField =
             typeof(MapCameraController).GetField("maxOrthoSize", BindingFlags.NonPublic | BindingFlags.Instance);
 
+        // PanTo used to be instant; it's now an eased coroutine (see
+        // MapCameraController's own comment on why) — DrivePanToRoutine
+        // below invokes this directly and steps it manually rather than
+        // calling the public PanTo and waiting for Unity to service its
+        // StartCoroutine. That was tried first (twice — once waiting a
+        // fixed duration, once waiting a generous fixed frame count) and
+        // both failed for the same underlying reason, confirmed by a real
+        // failure that even a full 5 real seconds of yield-return-null
+        // polling never let a StartCoroutine'd MonoBehaviour coroutine
+        // progress past its first yield in this EditMode test context —
+        // it just isn't serviced here, no matter how long the test waits.
+        // The test's OWN [UnityTest] enumerator ticks fine (proven by
+        // that same 5-second wait actually elapsing) — it's specifically
+        // StartCoroutine's separate scheduling that doesn't run, so
+        // driving the routine's IEnumerator by hand inside the test's own
+        // loop sidesteps that entirely instead of depending on it.
+        private static readonly MethodInfo PanToRoutineMethod =
+            typeof(MapCameraController).GetMethod("PanToRoutine", BindingFlags.NonPublic | BindingFlags.Instance);
+
         private GameObject cameraObject;
         private Camera camera;
         private MapCameraController controller;
@@ -63,6 +84,23 @@ namespace StarBound.Tests
         public void TearDown()
         {
             Object.DestroyImmediate(cameraObject);
+        }
+
+        // Drives PanToRoutine to completion inside the test's own proven-
+        // reliable [UnityTest] pump loop, one MoveNext per real editor
+        // tick — see PanToRoutineMethod's own comment for why this
+        // bypasses the public PanTo/StartCoroutine path entirely instead
+        // of waiting on it. targetZ mirrors PanTo's own trivial
+        // z-preservation (new Vector3(x, y, orthoCamera's current z)) —
+        // recomputed here rather than going through PanTo itself, same
+        // "known math, not a black box" precedent ExpectedPanBounds below
+        // already establishes for the clamp formula.
+        private IEnumerator DrivePanToRoutine(Vector3 targetXY)
+        {
+            var target = new Vector3(targetXY.x, targetXY.y, camera.transform.position.z);
+            var routine = (IEnumerator)PanToRoutineMethod.Invoke(controller, new object[] { target });
+            while (routine.MoveNext())
+                yield return null;
         }
 
         [Test]
@@ -112,18 +150,24 @@ namespace StarBound.Tests
             Assert.AreEqual(6f * 1f * cameraPadding, maxOrthoSize, 0.001f);
         }
 
-        [Test]
-        public void PanTo_MovesCameraExactlyToTargetWhenWellWithinMapBounds()
+        [UnityTest]
+        public IEnumerator PanTo_MovesCameraExactlyToTargetWhenWellWithinMapBounds()
         {
             controller.Initialize(mapRadius: 8, hexRadius: 1f);
             camera.orthographicSize = 1f; // zoomed in, so there's real room to pan
 
-            controller.PanTo(new Vector3(2f, 3f, 0f));
+            yield return DrivePanToRoutine(new Vector3(2f, 3f));
 
             Assert.AreEqual(2f, camera.transform.position.x, 0.001f);
             Assert.AreEqual(3f, camera.transform.position.y, 0.001f);
         }
 
+        // Left as a synchronous [Test] rather than converted like its
+        // siblings below — the glide's start and target z are always the
+        // same value (see PanTo), so z is invariant across every frame of
+        // the tween, not just the final one. Asserting immediately after
+        // the call starts (before the coroutine's first yield) already
+        // observes the correct, unchanging value.
         [Test]
         public void PanTo_PreservesCameraZDepthRegardlessOfTargetZ()
         {
@@ -135,38 +179,38 @@ namespace StarBound.Tests
             Assert.AreEqual(originalZ, camera.transform.position.z, 0.001f);
         }
 
-        [Test]
-        public void PanTo_ClampsToTheMapsHalfExtentsWhenTargetIsFarOutsideIt()
+        [UnityTest]
+        public IEnumerator PanTo_ClampsToTheMapsHalfExtentsWhenTargetIsFarOutsideIt()
         {
             const int mapRadius = 5;
             const float hexRadius = 1f;
             controller.Initialize(mapRadius, hexRadius);
             camera.orthographicSize = 1f; // zoomed in, so clamping actually kicks in
 
-            controller.PanTo(new Vector3(10000f, 10000f, 0f));
+            yield return DrivePanToRoutine(new Vector3(10000f, 10000f));
 
             var (expectedMaxX, expectedMaxY) = ExpectedPanBounds(mapRadius, hexRadius);
             Assert.AreEqual(expectedMaxX, camera.transform.position.x, 0.001f);
             Assert.AreEqual(expectedMaxY, camera.transform.position.y, 0.001f);
         }
 
-        [Test]
-        public void PanTo_ClampsSymmetricallyInTheNegativeDirection()
+        [UnityTest]
+        public IEnumerator PanTo_ClampsSymmetricallyInTheNegativeDirection()
         {
             const int mapRadius = 5;
             const float hexRadius = 1f;
             controller.Initialize(mapRadius, hexRadius);
             camera.orthographicSize = 1f;
 
-            controller.PanTo(new Vector3(-10000f, -10000f, 0f));
+            yield return DrivePanToRoutine(new Vector3(-10000f, -10000f));
 
             var (expectedMaxX, expectedMaxY) = ExpectedPanBounds(mapRadius, hexRadius);
             Assert.AreEqual(-expectedMaxX, camera.transform.position.x, 0.001f);
             Assert.AreEqual(-expectedMaxY, camera.transform.position.y, 0.001f);
         }
 
-        [Test]
-        public void PanTo_ClampsToTheDefaultZoomedOutViewWithNoExplicitZoomApplied()
+        [UnityTest]
+        public IEnumerator PanTo_ClampsToTheDefaultZoomedOutViewWithNoExplicitZoomApplied()
         {
             // Confirms the same clamp formula holds at Initialize's own
             // default zoom, not just a manually-zoomed-in orthographicSize
@@ -183,7 +227,7 @@ namespace StarBound.Tests
             const float hexRadius = 1f;
             controller.Initialize(mapRadius, hexRadius);
 
-            controller.PanTo(new Vector3(50f, 50f, 0f));
+            yield return DrivePanToRoutine(new Vector3(50f, 50f));
 
             var (expectedMaxX, expectedMaxY) = ExpectedPanBounds(mapRadius, hexRadius);
             Assert.AreEqual(expectedMaxX, camera.transform.position.x, 0.001f);
