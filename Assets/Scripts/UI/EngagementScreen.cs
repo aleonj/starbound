@@ -9,6 +9,18 @@ using StarBound.Economy;
 
 namespace StarBound.UI
 {
+    // Classifies a round's outcome for EngagementScreen's impact feedback
+    // (see PlayRoundOutcomeFeedback) — Info covers non-attack banners
+    // (Escape/Initiative), which get no impact feedback at all.
+    public enum RoundBannerKind
+    {
+        Info,
+        Miss,
+        Hit,
+        CriticalHit
+    }
+
+
     // Full-screen, dedicated combat-resolution UI — replaces MatchHud's old
     // IMGUI DrawEngagementPanel/DrawConsumablesMidEngagement. "The most
     // frequent, highest-stakes interaction in the game" per this story,
@@ -60,6 +72,24 @@ namespace StarBound.UI
         // Neither player's own color — a fiery, neutral "clash" accent
         // for the VS mark between the two combatant blocks.
         private static readonly Color VersusColor = new(0.95f, 0.55f, 0.2f);
+        // Warm rather than pure white — pure white briefly flashed on a
+        // stat bar read more like a UI glitch than an impact in an early
+        // pass of this.
+        private static readonly Color HitFlashColor = new(1f, 0.95f, 0.7f);
+
+        // Crit gets a visibly bigger version of every effect below than a
+        // regular hit — bigger pulse, bigger shake, longer/brighter bar
+        // flash — so it actually reads as the bigger deal it is rather
+        // than just a different color on the same-sized effect.
+        private const float HitPulseScale = 1.15f;
+        private const float CritPulseScale = 1.3f;
+        private const float HitShakeMagnitude = 5f;
+        private const float CritShakeMagnitude = 11f;
+        private const float PanelShakeDuration = 0.25f;
+        private const float HitBarFlashDuration = 0.25f;
+        private const float CritBarFlashDuration = 0.4f;
+        private const float WhiffShakeDuration = 0.3f;
+        private const float WhiffShakeMagnitude = 8f;
 
         private GameObject background;
         private RectTransform panelRect;
@@ -90,7 +120,10 @@ namespace StarBound.UI
         private Text playerSpeedValueText;
 
         private Text roundResultText;
-        private Coroutine critPulseCoroutine;
+        private Coroutine roundResultPulseCoroutine;
+        private Coroutine defenderBarFlashCoroutine;
+        private Coroutine panelShakeCoroutine;
+        private Coroutine whiffShakeCoroutine;
         private string lastPulsedRoundResultText;
         private Text rollDetailText;
 
@@ -126,7 +159,7 @@ namespace StarBound.UI
             EngagementSession session, string opponentDisplayName, Color opponentAccentColor, Color playerAccentColor,
             Color activeAccentColor,
             string rollDetail, IReadOnlyList<ItemDefinition> usableConsumables,
-            string roundResultMessage, Color roundResultColor, bool isCriticalHit,
+            string roundResultMessage, Color roundResultColor, RoundBannerKind roundBannerKind, bool defenderIsPlayer,
             Action onAttemptEscape, Action onRollInitiative, Action onBrace, Action onHold,
             Action onAttack, Action onContinue, Action<ItemDefinition> onUseItem,
             Action onOpponentAttemptEscape, Action onOpponentBrace, Action onOpponentHold)
@@ -217,13 +250,13 @@ namespace StarBound.UI
             {
                 roundResultText.text = roundResultMessage;
                 roundResultText.color = roundResultColor;
-                // Only pulse when this is actually a NEW crit message —
+                // Only fire feedback when this is actually a NEW message —
                 // Refresh can run again for unrelated reasons (e.g. a
                 // consumable used afterward) without re-triggering it.
-                if (isCriticalHit && roundResultMessage != lastPulsedRoundResultText)
+                if (roundBannerKind != RoundBannerKind.Info && roundResultMessage != lastPulsedRoundResultText)
                 {
                     lastPulsedRoundResultText = roundResultMessage;
-                    PulseRoundResult();
+                    PlayRoundOutcomeFeedback(roundBannerKind, defenderIsPlayer);
                 }
             }
 
@@ -242,30 +275,51 @@ namespace StarBound.UI
             RebuildConsumableRow(usableConsumables, onUseItem);
         }
 
-        // Cheap, no-animation-package way to make a crit actually feel
-        // like a crit — grow briefly, settle back. Restarts cleanly if
-        // triggered again before finishing (shouldn't normally happen
-        // given the "only on a new message" guard in Refresh, but a
-        // stale coroutine reference would otherwise leak).
-        private void PulseRoundResult()
+        // A miss gets its own distinct feedback (a horizontal "whiff"
+        // shake, no impact at all) rather than just a quieter version of
+        // a hit's — a dodge and a landed blow should read as opposite
+        // things, not the same effect turned down. Hit/CriticalHit share
+        // the same three effects (pulse, panel shake, defender bar
+        // flash), scaled up for a crit.
+        private void PlayRoundOutcomeFeedback(RoundBannerKind kind, bool defenderIsPlayer)
         {
-            if (critPulseCoroutine != null)
-                StopCoroutine(critPulseCoroutine);
-            critPulseCoroutine = StartCoroutine(PulseRoundResultRoutine());
+            if (kind == RoundBannerKind.Miss)
+            {
+                PlayWhiffShake();
+                return;
+            }
+
+            var isCrit = kind == RoundBannerKind.CriticalHit;
+            PulseRoundResult(isCrit ? CritPulseScale : HitPulseScale);
+            PlayPanelShake(isCrit ? CritShakeMagnitude : HitShakeMagnitude);
+            PlayBarFlash(defenderIsPlayer ? playerHullFill : opponentHullFill, isCrit ? CritBarFlashDuration : HitBarFlashDuration);
         }
 
-        private IEnumerator PulseRoundResultRoutine()
+        // Cheap, no-animation-package way to make a hit actually feel
+        // like one — grow briefly, settle back. Restarts cleanly if
+        // triggered again before finishing (shouldn't normally happen
+        // given the "only on a new message" guard in Refresh, but a
+        // stale coroutine reference would otherwise leak) — every other
+        // Play* method below follows this same restart-cleanly shape.
+        private void PulseRoundResult(float peakScale)
+        {
+            if (roundResultPulseCoroutine != null)
+                StopCoroutine(roundResultPulseCoroutine);
+            roundResultPulseCoroutine = StartCoroutine(PulseRoundResultRoutine(peakScale));
+        }
+
+        private IEnumerator PulseRoundResultRoutine(float peakScale)
         {
             var rect = roundResultText.rectTransform;
             var baseScale = Vector3.one;
-            var peakScale = Vector3.one * 1.3f;
+            var peak = Vector3.one * peakScale;
             const float halfDuration = 0.16f;
 
             var elapsed = 0f;
             while (elapsed < halfDuration)
             {
                 elapsed += Time.deltaTime;
-                rect.localScale = Vector3.Lerp(baseScale, peakScale, elapsed / halfDuration);
+                rect.localScale = Vector3.Lerp(baseScale, peak, elapsed / halfDuration);
                 yield return null;
             }
 
@@ -273,12 +327,97 @@ namespace StarBound.UI
             while (elapsed < halfDuration)
             {
                 elapsed += Time.deltaTime;
-                rect.localScale = Vector3.Lerp(peakScale, baseScale, elapsed / halfDuration);
+                rect.localScale = Vector3.Lerp(peak, baseScale, elapsed / halfDuration);
                 yield return null;
             }
 
             rect.localScale = baseScale;
-            critPulseCoroutine = null;
+            roundResultPulseCoroutine = null;
+        }
+
+        // Jolts the whole panel (buttons included) briefly around its
+        // known rest position — CreateGlassPanel never repositions this
+        // panel away from (0,0), so that's used directly as the anchor to
+        // restore to, rather than capturing "current" position, which
+        // could already be mid-shake-offset if triggered again quickly.
+        private void PlayPanelShake(float magnitude)
+        {
+            if (panelShakeCoroutine != null)
+                StopCoroutine(panelShakeCoroutine);
+            panelShakeCoroutine = StartCoroutine(PanelShakeRoutine(magnitude));
+        }
+
+        private IEnumerator PanelShakeRoutine(float magnitude)
+        {
+            var elapsed = 0f;
+            while (elapsed < PanelShakeDuration)
+            {
+                elapsed += Time.deltaTime;
+                var falloff = 1f - elapsed / PanelShakeDuration;
+                var offset = new Vector2(UnityEngine.Random.Range(-1f, 1f), UnityEngine.Random.Range(-1f, 1f)) * magnitude * falloff;
+                panelRect.anchoredPosition = offset;
+                yield return null;
+            }
+
+            panelRect.anchoredPosition = Vector2.zero;
+            panelShakeCoroutine = null;
+        }
+
+        // Flashes the defender's Hull bar to a bright "impact" color and
+        // fades it back to whatever SetStatBar already computed for the
+        // post-damage value (captured fresh each call, not a fixed
+        // target) — SetStatBar always runs earlier in the same Refresh,
+        // so fillImage.color is already the correct resting color when
+        // this starts.
+        private void PlayBarFlash(Image fillImage, float duration)
+        {
+            if (defenderBarFlashCoroutine != null)
+                StopCoroutine(defenderBarFlashCoroutine);
+            defenderBarFlashCoroutine = StartCoroutine(BarFlashRoutine(fillImage, duration));
+        }
+
+        private IEnumerator BarFlashRoutine(Image fillImage, float duration)
+        {
+            var restColor = fillImage.color;
+            fillImage.color = HitFlashColor;
+
+            var elapsed = 0f;
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                fillImage.color = Color.Lerp(HitFlashColor, restColor, Mathf.Clamp01(elapsed / duration));
+                yield return null;
+            }
+
+            fillImage.color = restColor;
+            defenderBarFlashCoroutine = null;
+        }
+
+        // A horizontal wobble on the round-result text only — no panel
+        // shake, no bar flash, nothing landed. Reads as a dodge rather
+        // than a quieter hit.
+        private void PlayWhiffShake()
+        {
+            if (whiffShakeCoroutine != null)
+                StopCoroutine(whiffShakeCoroutine);
+            whiffShakeCoroutine = StartCoroutine(WhiffShakeRoutine());
+        }
+
+        private IEnumerator WhiffShakeRoutine()
+        {
+            var rect = roundResultText.rectTransform;
+            var elapsed = 0f;
+            while (elapsed < WhiffShakeDuration)
+            {
+                elapsed += Time.deltaTime;
+                var t = elapsed / WhiffShakeDuration;
+                var offset = Mathf.Sin(t * Mathf.PI * 5f) * WhiffShakeMagnitude * (1f - t);
+                rect.anchoredPosition = new Vector2(offset, rect.anchoredPosition.y);
+                yield return null;
+            }
+
+            rect.anchoredPosition = new Vector2(0f, rect.anchoredPosition.y);
+            whiffShakeCoroutine = null;
         }
 
         private static void SetStatBar(Image fillImage, int currentValue, int startingValue)

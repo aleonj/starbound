@@ -97,8 +97,12 @@ namespace StarBound.Demo
         // which isn't a roll but shares the same single-line slot.
         private string lastEventDetail;
         // The most recent round's outcome, shown as a prominent banner on
-        // EngagementScreen.
-        private (string Text, Color Color, bool IsCrit) lastRoundBanner = (string.Empty, Color.white, false);
+        // EngagementScreen. Kind/DefenderIsPlayer drive EngagementScreen's
+        // own impact feedback (bar flash/panel shake/whiff shake) — Info
+        // for non-attack banners (Escape/Initiative), which get none of
+        // that. DefenderIsPlayer is meaningless when Kind is Info.
+        private (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) lastRoundBanner =
+            (string.Empty, Color.white, RoundBannerKind.Info, false);
         private static readonly Color BannerMissColor = new(0.6f, 0.6f, 0.65f);
         private static readonly Color BannerHitColor = new(0.85f, 0.35f, 0.25f);
         private static readonly Color BannerCritColor = new(1f, 0.82f, 0.2f);
@@ -679,7 +683,8 @@ namespace StarBound.Demo
                 usableConsumables,
                 lastRoundBanner.Text,
                 lastRoundBanner.Color,
-                lastRoundBanner.IsCrit,
+                lastRoundBanner.Kind,
+                lastRoundBanner.DefenderIsPlayer,
                 OnAttemptEscapeClicked,
                 OnRollInitiativeClicked,
                 OnBraceClicked,
@@ -1291,7 +1296,7 @@ namespace StarBound.Demo
                 if (activeSession != null)
                 {
                     deviceHolder = RoundAttacker.Player;
-                    lastRoundBanner = (string.Empty, Color.white, false);
+                    lastRoundBanner = (string.Empty, Color.white, RoundBannerKind.Info, false);
                     lastEventDetail = null;
                 }
             }
@@ -1580,28 +1585,29 @@ namespace StarBound.Demo
         // DescribeInitiative/DescribeAttack/DescribeEscape and
         // EngagementScreen's own rollDetailText), but shouldn't be the
         // only place a round's actual outcome is visible.
-        private static (string Text, Color Color, bool IsCrit) DescribeRoundBanner(RoundResult result, string playerLabel, string opponentLabel)
+        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeRoundBanner(RoundResult result, string playerLabel, string opponentLabel)
         {
             var attackerLabel = result.Attacker == RoundAttacker.Player ? playerLabel : opponentLabel;
             var defenderLabel = result.Attacker == RoundAttacker.Player ? opponentLabel : playerLabel;
             var takes = Conjugate(defenderLabel, "take", "takes");
+            var defenderIsPlayer = result.Attacker != RoundAttacker.Player;
 
             if (!result.HitLanded)
-                return ($"{attackerLabel} missed!", BannerMissColor, false);
+                return ($"{attackerLabel} missed!", BannerMissColor, RoundBannerKind.Miss, defenderIsPlayer);
             if (result.WasCriticalHit)
-                return ($"CRITICAL HIT! {defenderLabel} {takes} {result.Damage} damage!", BannerCritColor, true);
-            return ($"{defenderLabel} {takes} {result.Damage} damage.", BannerHitColor, false);
+                return ($"CRITICAL HIT! {defenderLabel} {takes} {result.Damage} damage!", BannerCritColor, RoundBannerKind.CriticalHit, defenderIsPlayer);
+            return ($"{defenderLabel} {takes} {result.Damage} damage.", BannerHitColor, RoundBannerKind.Hit, defenderIsPlayer);
         }
 
-        private static (string Text, Color Color, bool IsCrit) DescribeInitiativeBanner(InitiativeResult result, string playerLabel, string opponentLabel) =>
+        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeInitiativeBanner(InitiativeResult result, string playerLabel, string opponentLabel) =>
             result.Attacker == RoundAttacker.Player
-                ? ($"{playerLabel} {Conjugate(playerLabel, "win", "wins")} initiative!", BannerInitiativeColor, false)
-                : ($"{opponentLabel} {Conjugate(opponentLabel, "win", "wins")} initiative!", BannerInitiativeColor, false);
+                ? ($"{playerLabel} {Conjugate(playerLabel, "win", "wins")} initiative!", BannerInitiativeColor, RoundBannerKind.Info, false)
+                : ($"{opponentLabel} {Conjugate(opponentLabel, "win", "wins")} initiative!", BannerInitiativeColor, RoundBannerKind.Info, false);
 
-        private static (string Text, Color Color, bool IsCrit) DescribeEscapeBanner(EscapeAttemptResult result, string selfLabel) =>
+        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeEscapeBanner(EscapeAttemptResult result, string selfLabel) =>
             result.Success
-                ? ($"{selfLabel} escaped!", BannerEscapeColor, false)
-                : ($"{selfLabel}'s escape failed!", BannerMissColor, false);
+                ? ($"{selfLabel} escaped!", BannerEscapeColor, RoundBannerKind.Info, false)
+                : ($"{selfLabel}'s escape failed!", BannerMissColor, RoundBannerKind.Info, false);
 
         private void CreateShipMarkers()
         {
