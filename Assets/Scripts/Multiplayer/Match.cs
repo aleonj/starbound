@@ -314,15 +314,11 @@ namespace StarBound.Multiplayer
             if (hex != null && hex.HasEngagement && hex.Engagement <= MaxUnlockedTier)
                 CurrentPlayer.DiscoverHex(position);
 
-            // Minefield Damage variable — applied against the arrival hex
+            // Intrinsic hazard damage — applied against the arrival hex
             // itself, before any relocation a depleted Hull might cause
             // (see IntegrityPenaltyService's documented "invoke after
             // anything that can deplete Hull/Energy" contract).
-            if (hex != null && hex.Terrain == TerrainType.Mines && ActiveVariable == MatchVariable.MinefieldDamage)
-            {
-                CurrentPlayer.Ship.ApplyStatDelta(CoreStat.Hull, -1);
-                IntegrityPenaltyService.ApplyIfDepleted(CurrentPlayer, Map);
-            }
+            ApplyHazardDamageIfUnlucky(hex, rng);
 
             TryCompleteTravelAndPayGoal();
 
@@ -336,6 +332,37 @@ namespace StarBound.Multiplayer
                 activeEngagement = session;
                 ExhaustActions(); // an ambush spends the whole remaining budget
             }
+        }
+
+        // Asteroids and Mines each carry their own intrinsic damage
+        // chance (see HazardChances) — Debris is deliberately not
+        // included here, it isn't considered hazardous. Previously Mines
+        // only ever damaged a player when the (temporary, event-driven)
+        // MinefieldDamage variable happened to be active, meaning most of
+        // a match it was harmless, and Asteroids never damaged a player
+        // at all. Asteroids stays the less dangerous of the two — it also
+        // doubles as a mining opportunity (see CanMineAsteroid), Mines
+        // has no upside at all. MinefieldDamage now intensifies the base
+        // Mines danger rather than being the sole source of it.
+        private void ApplyHazardDamageIfUnlucky(Hex hex, Random rng)
+        {
+            if (hex == null)
+                return;
+
+            var damageChance = hex.Terrain switch
+            {
+                TerrainType.Asteroids => HazardChances.AsteroidDamageChance,
+                TerrainType.Mines => ActiveVariable == MatchVariable.MinefieldDamage
+                    ? HazardChances.MinefieldDamageChanceDuringAlert
+                    : HazardChances.MinefieldDamageChance,
+                _ => 0.0
+            };
+
+            if (damageChance <= 0.0 || rng.NextDouble() >= damageChance)
+                return;
+
+            CurrentPlayer.Ship.ApplyStatDelta(CoreStat.Hull, -1);
+            IntegrityPenaltyService.ApplyIfDepleted(CurrentPlayer, Map);
         }
 
         // First player to be standing on the goal's hex with enough money

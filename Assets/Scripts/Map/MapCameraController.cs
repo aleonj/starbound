@@ -73,6 +73,11 @@ namespace StarBound.Map
         // Active eased PanTo, if any — see PanTo/CancelPan.
         private Coroutine panRoutine;
 
+        // Drives GalaxyBackground.shader's parallax star layers — see its
+        // own comment. Pushed every frame regardless of whether the camera
+        // actually moved this frame (cheap: one global vector set).
+        private static readonly int CameraOffsetShaderId = Shader.PropertyToID("_StarBoundCameraOffset");
+
         private void Awake()
         {
             orthoCamera = GetComponent<Camera>();
@@ -141,6 +146,8 @@ namespace StarBound.Map
         {
             if (orthoCamera == null || !orthoCamera.orthographic)
                 return;
+
+            Shader.SetGlobalVector(CameraOffsetShaderId, orthoCamera.transform.position);
 
             var touchCount = CollectActiveTouches();
 

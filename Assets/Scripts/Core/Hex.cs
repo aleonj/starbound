@@ -15,6 +15,15 @@ namespace StarBound.Core
         // to printing the raw coordinate when this is unset.
         public string Name { get; set; }
 
+        // Only meaningful for TerrainType.PlanetOrStarport hexes — false
+        // means it's a Planet. Both remain the same gameplay terrain
+        // (landing/shop/job/integrity-penalty logic treats them
+        // identically), but a Starport looks different (see
+        // PlanetSpin.shader's _IsStarport branch), draws its name from a
+        // different pool (see StarportNames), and is never a tradelane
+        // endpoint (see MapGenerator.ConnectPlanetsWithTradelanes).
+        public bool IsStarport { get; set; }
+
         // A planet's persistent shop shelf (see PlanetShopService) — null
         // means it's never been generated yet (first visit), as opposed
         // to an empty list (every slot currently sold out, awaiting a

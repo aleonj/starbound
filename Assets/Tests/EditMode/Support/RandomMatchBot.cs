@@ -31,6 +31,7 @@ namespace StarBound.Tests
         public int FinalWinnerMoney;
         public int PvEWins;
         public int PvPWins; // never counts toward victory — see Match.AttackOpponent
+        public EngagementTier FinalMaxUnlockedTier; // how far progression phased in before the turn cap hit
 
         public int TotalEngagements => EngagementsWon + EngagementsLost + EngagementsEscaped;
     }
@@ -72,11 +73,43 @@ namespace StarBound.Tests
         // dice already rolled happens to offer one.
         private const int GoalPursuitWeight = 5;
 
+        // Same idea as GoalPursuitWeight, but for the bot's own accepted
+        // job (see GetJobPursuitTarget) rather than the shared progression
+        // goal. Added because the diagnostic dump for the grinding/wipe
+        // investigation showed the bot finishing most matches at ~0 money
+        // — jobs are the only real income source, but accepting/delivering
+        // one was a single unweighted entry each, easily lost among dozens
+        // of ordinary move options, so income never accumulated regardless
+        // of what the wipe penalty or shop weighting did afterward.
+        private const int JobPursuitWeight = 5;
+        private const int JobAcceptWeight = 3;
+        private const int JobProgressWeight = 6; // mining or delivering an eligible job
+
+        // A Permanent item whose stat is still below the CURRENT unlocked
+        // tier's typical NPC stat gets this many extra copies in the buy
+        // pool — much higher than the flush-money buyWeight below, since
+        // otherwise the bot treats a Weapons Upgrade and a Repair Kit as
+        // equally interesting and rarely actually closes the gap before
+        // wandering into a live engagement at that tier. See
+        // BuildLegalActions' underEquippedStats/GetGrindTarget. A real
+        // player would grind deliberately; this is the bot's stand-in for
+        // that instinct — see the [Multiplayer] game-progression story's
+        // follow-up finding.
+        private const int GrindBuyWeight = 12;
+
+        private static readonly CoreStat[] PerformanceStats =
+            { CoreStat.Weapons, CoreStat.Shields, CoreStat.Speed };
+
+        // Matches DemoBootstrap.StartingCargoCapacity — kept in sync so the
+        // simulator's gear ceiling reflects what a real match actually
+        // allows (see that constant's doc comment for why it's 6, not 3).
+        private const int StartingCargoCapacity = 6;
+
         public static MatchSimulationResult PlayFullMatch(int seed, MapSize mapSize, Difficulty difficulty, int turnCap)
         {
             var rng = new Random(seed);
-            var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3, EconomyConstants.StartingMoney));
-            var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3, EconomyConstants.StartingMoney));
+            var p1 = new Player("p1", "One", new Ship(StartingCargoCapacity, EconomyConstants.StartingMoney));
+            var p2 = new Player("p2", "Two", new Ship(StartingCargoCapacity, EconomyConstants.StartingMoney));
             var match = MatchFactory.CreateMatch(mapSize, difficulty, seed, p1, p2);
 
             var result = new MatchSimulationResult { Seed = seed };
@@ -88,6 +121,7 @@ namespace StarBound.Tests
             }
 
             result.Completed = match.IsComplete;
+            result.FinalMaxUnlockedTier = match.MaxUnlockedTier;
             if (match.IsComplete)
                 result.FinalWinnerMoney = match.Winner.Ship.Money;
 
@@ -155,6 +189,24 @@ namespace StarBound.Tests
 
             var goal = match.ActiveGoal;
 
+            // Performance stats the ship hasn't yet reached the CURRENT
+            // unlocked tier's typical opponent stat for — engagements at
+            // that tier are already live on the map and can trigger the
+            // moment the bot wanders onto one, so this is evaluated
+            // against MaxUnlockedTier itself, not the tier being chased.
+            // See GrindBuyWeight.
+            var underEquippedStats = PerformanceStats
+                .Where(stat => ship.GetStat(stat) < GetGrindTarget(match.MaxUnlockedTier, stat))
+                .ToList();
+
+            // Where the bot's own accepted job needs it to go next: the
+            // nearest Asteroids field for an unmined Mining job, otherwise
+            // the job's delivery/bounty hex. See JobPursuitWeight — without
+            // this the bot rarely finishes a job at all (job-related moves
+            // are a tiny fraction of a large random move pool), so income
+            // stays too thin to ever fund grinding.
+            var jobTarget = GetJobPursuitTarget(match, player);
+
             if (match.CanMove)
             {
                 foreach (var die in match.CurrentHand.UnspentDice)
@@ -169,6 +221,15 @@ namespace StarBound.Tests
                         HexMath.Distance(target, goal.TargetHex) < HexMath.Distance(player.Position, goal.TargetHex))
                     {
                         for (var i = 0; i < GoalPursuitWeight; i++)
+                            actions.Add(() => match.Move(die, target, rng));
+                    }
+
+                    // See JobPursuitWeight — same idea, for whatever the
+                    // bot's own accepted job needs next.
+                    if (jobTarget.HasValue &&
+                        HexMath.Distance(target, jobTarget.Value) < HexMath.Distance(player.Position, jobTarget.Value))
+                    {
+                        for (var i = 0; i < JobPursuitWeight; i++)
                             actions.Add(() => match.Move(die, target, rng));
                     }
                 }
@@ -200,32 +261,58 @@ namespace StarBound.Tests
                     if (ship.Money - item.Price < moneyToPreserve)
                         continue;
 
-                    for (var i = 0; i < buyWeight; i++)
+                    var isGrindTarget = item.Kind == ItemKind.Permanent && item.AffectedStat.HasValue &&
+                        underEquippedStats.Contains(item.AffectedStat.Value);
+                    var weight = isGrindTarget ? GrindBuyWeight : buyWeight;
+
+                    for (var i = 0; i < weight; i++)
                         actions.Add(() => match.BuyItem(item));
                 }
 
                 foreach (var held in ship.HeldItems.ToList())
-                    actions.Add(() => match.SellItem(held));
+                {
+                    // Don't randomly discard a stat upgrade the ship still
+                    // needs to meet the current unlocked tier's typical
+                    // opponent stats — a grinding player holds onto
+                    // upgrades until they're no longer needed.
+                    if (!IsStillNeededForGrinding(held, underEquippedStats))
+                        actions.Add(() => match.SellItem(held));
+                }
             }
 
             if (match.CanAcceptJob && player.ActiveJob == null)
             {
+                // Weighted like repair/buy above — accepting a job costs
+                // nothing and is the only source of real income, so it
+                // shouldn't get lost among many move options whenever one
+                // is actually on offer.
                 foreach (var job in JobOfferGenerator.GenerateOffer(rng, player.Position, match.Map, match.MaxUnlockedTier))
-                    actions.Add(() => match.AcceptJob(job));
+                    for (var i = 0; i < JobAcceptWeight; i++)
+                        actions.Add(() => match.AcceptJob(job));
             }
 
             if (match.CanDeliverJob)
-                actions.Add(() => match.DeliverJob());
+            {
+                // Heavily weighted: once eligible, cashing in a job the
+                // bot already traveled for should almost always happen
+                // rather than getting passed over for an unrelated shop
+                // action in the same visit.
+                for (var i = 0; i < JobProgressWeight; i++)
+                    actions.Add(() => match.DeliverJob());
+            }
 
             if (match.CanMineAsteroid)
-                actions.Add(() => match.MineAsteroid());
+            {
+                for (var i = 0; i < JobProgressWeight; i++)
+                    actions.Add(() => match.MineAsteroid());
+            }
 
             if (match.CanAttackOpponent && rng.NextDouble() < AttackOpponentChance)
                 actions.Add(() => match.AttackOpponent());
 
             foreach (var held in ship.HeldItems.ToList())
             {
-                if (match.CanTradeWithOpponent(held))
+                if (match.CanTradeWithOpponent(held) && !IsStillNeededForGrinding(held, underEquippedStats))
                     actions.Add(() => match.TradeItemToOpponent(held));
                 if (match.CanUseItem(held))
                     actions.Add(() => match.UseItem(held));
@@ -238,6 +325,65 @@ namespace StarBound.Tests
             }
 
             return actions;
+        }
+
+        // Midpoint of the given tier's NPC range for one performance stat —
+        // the bot's grinding target. Using the midpoint rather than the
+        // floor means the bot aims to be competitive, not just barely
+        // above the weakest possible roll for that tier.
+        private static double GetGrindTarget(EngagementTier tier, CoreStat stat)
+        {
+            var definition = EngagementDefinitionTable.For(tier);
+            var range = stat switch
+            {
+                CoreStat.Weapons => definition.WeaponsRange,
+                CoreStat.Shields => definition.ShieldsRange,
+                CoreStat.Speed => definition.SpeedRange,
+                _ => throw new ArgumentOutOfRangeException(nameof(stat), stat, "Not a performance stat.")
+            };
+
+            return (range.Min + range.Max) / 2.0;
+        }
+
+        private static bool IsStillNeededForGrinding(ItemDefinition item, List<CoreStat> underEquippedStats) =>
+            item.Kind == ItemKind.Permanent && item.AffectedStat.HasValue &&
+            underEquippedStats.Contains(item.AffectedStat.Value);
+
+        // Where the bot's active job needs it next, or null if it has no
+        // job. A Mining job needs a trip to an Asteroids field before it
+        // needs the delivery planet; every other job type (and a Mining
+        // job post-mining) just needs its Destination.
+        private static HexCoordinate? GetJobPursuitTarget(Match match, Player player)
+        {
+            var job = player.ActiveJob;
+            if (job == null)
+                return null;
+
+            if (job.Type == JobType.Mining && !player.HasMinedCargo)
+                return FindNearestAsteroidHex(match, player.Position);
+
+            return job.Destination;
+        }
+
+        private static HexCoordinate? FindNearestAsteroidHex(Match match, HexCoordinate from)
+        {
+            HexCoordinate? nearest = null;
+            var nearestDistance = int.MaxValue;
+
+            foreach (var hex in match.Map.Hexes)
+            {
+                if (hex.Terrain != TerrainType.Asteroids)
+                    continue;
+
+                var distance = HexMath.Distance(from, hex.Coordinate);
+                if (distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = hex.Coordinate;
+                }
+            }
+
+            return nearest;
         }
 
         // Mirrors MatchHud.ComputeLegalTargets (a MonoBehaviour method we

@@ -101,12 +101,27 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void ClearMoneyAndItems_ResetsBothToEmpty()
+        public void ClearMoneyAndNonPermanentItems_ResetsMoneyButKeepsPermanentItems()
         {
             var ship = new Ship(cargoCapacity: 2, startingMoney: 50);
-            ship.TryAddItem(new ItemDefinition("Shield Booster", CoreStat.Shields, 1, 100));
+            var upgrade = new ItemDefinition("Shield Booster", CoreStat.Shields, 1, 100, ItemKind.Permanent);
+            ship.TryAddItem(upgrade);
 
-            ship.ClearMoneyAndItems();
+            ship.ClearMoneyAndNonPermanentItems();
+
+            Assert.AreEqual(0, ship.Money);
+            Assert.AreEqual(1, ship.HeldItems.Count);
+            Assert.AreEqual(4, ship.GetStat(CoreStat.Shields)); // 3 base + 1 — the upgrade still applies
+        }
+
+        [Test]
+        public void ClearMoneyAndNonPermanentItems_RemovesConsumablesAndUnlocks()
+        {
+            var ship = new Ship(cargoCapacity: 3, startingMoney: 50);
+            ship.TryAddItem(new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 50, ItemKind.Consumable));
+            ship.TryAddItem(new ItemDefinition("Wormhole Device", null, null, 500, ItemKind.Unlock));
+
+            ship.ClearMoneyAndNonPermanentItems();
 
             Assert.AreEqual(0, ship.Money);
             Assert.AreEqual(0, ship.HeldItems.Count);

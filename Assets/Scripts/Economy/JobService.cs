@@ -20,8 +20,9 @@ namespace StarBound.Economy
         // resolution path (EngagementSession/IntegrityPenaltyService) —
         // this only layers the job-specific consequences on top: the
         // reward on a win, or a 10% penalty fee for backing out via
-        // escape (a loss needs no extra penalty, since ClearMoneyAndItems
-        // already wipes the player out).
+        // escape (a loss needs no extra penalty, since
+        // ClearMoneyAndNonPermanentItems already wipes the player's money
+        // and consumables).
         public static void ResolveBountyOutcome(Player player, HexCoordinate resolvedHex, EngagementOutcome outcome)
         {
             var job = player.ActiveJob;

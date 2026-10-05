@@ -1325,15 +1325,88 @@ namespace StarBound.Tests
             Assert.AreEqual(EngagementTier.Easy, match.MaxUnlockedTier, "Firing the event alone shouldn't advance the phase — only completing its goal does.");
         }
 
+        // Mines/Asteroids damage is a per-arrival chance now (see
+        // HazardChances), not a guaranteed hit — these retry move-rng
+        // seeds until they see the outcome under test, rather than
+        // assuming a specific seed always lands one way. Same retry
+        // idiom BuildMatchWithVariable/BuildMatchWithGoalType above
+        // already use for a different kind of randomness.
         [Test]
-        public void MinefieldDamageVariable_EnteringAMinesHex_DealsOneHullDamage()
+        public void Mines_CanDealHullDamageOnArrival()
         {
-            var (match, p1, _) = BuildMatchWithVariable(MatchVariable.MinefieldDamage);
+            for (var seed = 1; seed <= 200; seed++)
+            {
+                var (match, p1, _) = BuildProgressionMatch(); // ActiveVariable defaults to None — baseline chance applies
+                match.RollDice(new Random(1));
+                match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(seed));
 
-            match.RollDice(new Random(1));
-            match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(1));
+                if (p1.Ship.GetStat(CoreStat.Hull) == Ship.DefaultStatValue - 1)
+                    return;
+            }
 
-            Assert.AreEqual(Ship.DefaultStatValue - 1, p1.Ship.GetStat(CoreStat.Hull));
+            Assert.Fail("Never rolled hull damage in 200 attempts at the baseline 1-in-5 Mines chance.");
+        }
+
+        [Test]
+        public void Mines_CanAvoidHullDamageOnArrival()
+        {
+            // The old behavior made Mines damage guaranteed once a
+            // specific variable was active and impossible otherwise —
+            // this confirms the new baseline chance genuinely isn't
+            // guaranteed either way.
+            for (var seed = 1; seed <= 200; seed++)
+            {
+                var (match, p1, _) = BuildProgressionMatch();
+                match.RollDice(new Random(1));
+                match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(seed));
+
+                if (p1.Ship.GetStat(CoreStat.Hull) == Ship.DefaultStatValue)
+                    return;
+            }
+
+            Assert.Fail("Hull damage occurred in all 200 attempts — Mines shouldn't be a guaranteed hit at a 1-in-5 chance.");
+        }
+
+        [Test]
+        public void Asteroids_CanDealHullDamageOnArrival()
+        {
+            for (var seed = 1; seed <= 300; seed++)
+            {
+                var map = new GameMap(radius: 2, Difficulty.Medium);
+                map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace));
+                map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.Asteroids));
+                var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+                var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+                var match = new Match(map, p1, p2);
+
+                match.RollDice(new Random(1));
+                match.Move(new RolledDie(0, TerrainType.Asteroids), new HexCoordinate(1, 0), new Random(seed));
+
+                if (p1.Ship.GetStat(CoreStat.Hull) == Ship.DefaultStatValue - 1)
+                    return;
+            }
+
+            Assert.Fail("Never rolled hull damage in 300 attempts at the 1-in-10 Asteroids chance.");
+        }
+
+        [Test]
+        public void MinefieldDamageVariable_RaisesTheOddsOfHullDamageOnArrival()
+        {
+            // Boosted to 1 in 2 while the alert is active — still a
+            // chance, not guaranteed, so this retries whole match setups
+            // (each already its own retry loop to land MinefieldDamage —
+            // see BuildMatchWithVariable) until one attempt lands a hit.
+            for (var attempt = 0; attempt < 30; attempt++)
+            {
+                var (match, p1, _) = BuildMatchWithVariable(MatchVariable.MinefieldDamage);
+                match.RollDice(new Random(1));
+                match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(attempt + 1));
+
+                if (p1.Ship.GetStat(CoreStat.Hull) == Ship.DefaultStatValue - 1)
+                    return;
+            }
+
+            Assert.Fail("Never rolled hull damage in 30 attempts at the boosted 1-in-2 Minefield Alert chance.");
         }
 
         [Test]

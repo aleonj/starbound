@@ -52,9 +52,13 @@ namespace StarBound.Map
             // PlaceWormholePairs' own budget-respecting pass uses, not a
             // best-effort fallback.
             var planets = PlaceSingles(map, rng, TerrainType.PlanetOrStarport, Budget(totalHexes, distribution.PlanetOrStarport), minDistance: 2);
+            AssignStarportRoles(map, rng, planets);
             AssignPlanetNames(map, rng, planets);
 
-            ConnectPlanetsWithTradelanes(map, planets, rng, Budget(totalHexes, distribution.Tradelane));
+            // Starports are deliberately excluded — tradelanes only ever
+            // connect true Planets (see AssignStarportRoles's own comment).
+            var tradelaneTargets = planets.Where(c => map.TryGetHex(c, out var hex) && !hex.IsStarport).ToList();
+            ConnectPlanetsWithTradelanes(map, tradelaneTargets, rng, Budget(totalHexes, distribution.Tradelane));
 
             return map;
         }
@@ -253,14 +257,57 @@ namespace StarBound.Map
 
         // Reuses the same rng the rest of generation threads through —
         // keeps name assignment deterministic per seed like everything
-        // else here, rather than drawing from a separate source.
+        // else here, rather than drawing from a separate source. Draws
+        // Planets and Starports from their own separate pools (see
+        // PlanetNames/StarportNames) so the two naming conventions never
+        // mix on one hex.
         private static void AssignPlanetNames(GameMap map, Random rng, List<HexCoordinate> planets)
         {
-            var names = PlanetNames.DrawUnique(rng, planets.Count);
-            for (var i = 0; i < planets.Count; i++)
+            var planetCoordinates = planets.Where(c => map.TryGetHex(c, out var hex) && !hex.IsStarport).ToList();
+            var starportCoordinates = planets.Where(c => map.TryGetHex(c, out var hex) && hex.IsStarport).ToList();
+
+            var planetNames = PlanetNames.DrawUnique(rng, planetCoordinates.Count);
+            for (var i = 0; i < planetCoordinates.Count; i++)
             {
-                if (map.TryGetHex(planets[i], out var hex))
-                    hex.Name = names[i];
+                if (map.TryGetHex(planetCoordinates[i], out var hex))
+                    hex.Name = planetNames[i];
+            }
+
+            var starportNames = StarportNames.DrawUnique(rng, starportCoordinates.Count);
+            for (var i = 0; i < starportCoordinates.Count; i++)
+            {
+                if (map.TryGetHex(starportCoordinates[i], out var hex))
+                    hex.Name = starportNames[i];
+            }
+        }
+
+        // Rolled once per placed planet, independently, right after
+        // placement and before naming/tradelane routing (both of which
+        // need to know the final role). Capped so at least
+        // MinRemainingPlanets always stay true Planets regardless of how
+        // the rolls land — tradelanes only ever route between Planets
+        // (see ConnectPlanetsWithTradelanes's call site), and a map with
+        // fewer than 2 real Planet targets would silently stop producing
+        // any tradelanes at all, which existing map-generation tests
+        // assume never happens.
+        private const float StarportChance = 0.3f;
+        private const int MinRemainingPlanets = 2;
+
+        private static void AssignStarportRoles(GameMap map, Random rng, List<HexCoordinate> planets)
+        {
+            var maxStarports = Math.Max(0, planets.Count - MinRemainingPlanets);
+            var starportCount = 0;
+
+            foreach (var coordinate in planets)
+            {
+                if (starportCount >= maxStarports)
+                    break;
+
+                if (rng.NextDouble() < StarportChance && map.TryGetHex(coordinate, out var hex))
+                {
+                    hex.IsStarport = true;
+                    starportCount++;
+                }
             }
         }
 

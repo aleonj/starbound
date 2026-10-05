@@ -133,6 +133,8 @@ namespace StarBound.Tests
             TestContext.WriteLine("turn cap — see the [Multiplayer] game-progression story for this");
             TestContext.WriteLine("finding. Low/zero completion here is expected for now, not a bug.");
             TestContext.WriteLine($"Matches completed: {completed.Count}/{results.Count} ({TurnCap}-turn cap)");
+            var tierBreakdown = results.GroupBy(r => r.FinalMaxUnlockedTier).OrderBy(g => g.Key);
+            TestContext.WriteLine("Final unlocked tier reached — " + string.Join(", ", tierBreakdown.Select(g => $"{g.Key}: {g.Count()}")));
             TestContext.WriteLine($"Turns played — min: {results.Min(r => r.TotalTurns)}, max: {results.Max(r => r.TotalTurns)}, avg: {results.Average(r => r.TotalTurns):F1}");
             TestContext.WriteLine($"Engagements per match — avg: {results.Average(r => r.TotalEngagements):F1}, total: {totalEngagements}");
             TestContext.WriteLine($"Engagement outcomes — won: {winRate:P0}, lost: {lossRate:P0}, escaped: {escapeRate:P0}");

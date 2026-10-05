@@ -2,18 +2,19 @@ using System;
 
 namespace StarBound.Map
 {
-    // Hand-authored name pool for planets/starports — maps only ever have
-    // a handful (budget tops out around 13 on the largest/easiest map),
-    // so a procedural generator would be overkill. First-pass flavor,
-    // easy to extend.
+    // Hand-authored name pool for planets — maps only ever have a handful
+    // (budget tops out around 13 on the largest/easiest map), so a
+    // procedural generator would be overkill. First-pass flavor, easy to
+    // extend. Starports draw from a separate, deliberately more
+    // man-made-sounding pool instead — see StarportNames.
     public static class PlanetNames
     {
         private static readonly string[] Pool =
         {
-            "Kestrel Station", "Meridian", "Vantage Point", "Halcyon", "Ironhold",
+            "Meridian", "Vantage Point", "Halcyon", "Ironhold",
             "Driftwatch", "New Meridian", "Solace", "Farrow's Landing", "Beacon Reach",
             "Cinder", "Perch", "Outer Vale", "Amaranth", "Shepherd's Rest",
-            "Tanager", "Wren's Crossing", "Ashport", "Corvid Station", "Sable Reach",
+            "Tanager", "Wren's Crossing", "Ashport", "Sable Reach",
             "Marrow", "Talon's Edge", "Greywater", "Nightfall", "Sunder",
             "Bastion", "Thistledown", "Lowlight", "Verge", "Ember Reach",
             "Quillon", "Windrow",

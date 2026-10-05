@@ -20,7 +20,17 @@ namespace StarBound.Demo
         // screen existed.
         private const Difficulty FixedDifficulty = Difficulty.Medium;
         private const float HexRadius = 1f;
-        private const int StartingCargoCapacity = 3;
+        // Raised from 3 (see the [Multiplayer] game-progression story's
+        // 2026-09-29 finding): with 3 slots, a maximally-geared player
+        // tops out at exactly Hard tier's stat floor (base 3 + one +2
+        // Permanent item per Performance stat = 5, vs. Hard's 5-7 range)
+        // and can never beat an average or strong Hard NPC no matter how
+        // well they play. 6 slots lets two +2 items stack per stat (3 + 4
+        // = 7), making Hard's full range actually reachable — at the cost
+        // of every slot, so a real player still has to choose between
+        // maxing combat stats and keeping room for a Repair Kit, Energy
+        // Cell, or the Wormhole Device.
+        private const int StartingCargoCapacity = 6;
         // Generous fixed size for the background quad — comfortably covers
         // the camera's view even at the largest map/most zoomed-out size
         // (see MapCameraController's zoom-out ceiling), simpler than
@@ -127,11 +137,46 @@ namespace StarBound.Demo
         // starfield only ever showed up inside each hex's own mesh; the
         // gaps between tiles and the area outside the grid were just the
         // camera's flat clear color.
+        //
+        // Built manually (MeshFilter/MeshRenderer only) rather than via
+        // GameObject.CreatePrimitive(PrimitiveType.Quad) — CreatePrimitive
+        // always auto-attaches a MeshCollider, which this immediately
+        // discarded anyway (no gameplay ever needs to hit-test this
+        // background). With that the only Physics-module usage anywhere
+        // in the project, the IL2CPP linker (stripEngineCode is on, see
+        // ProjectSettings) strips the module entirely, and the
+        // MeshCollider auto-attach then fails at runtime with "Can't add
+        // component because class 'MeshCollider' doesn't exist!" —
+        // confirmed on an iOS device build. Building the quad by hand
+        // removes the dependency at the root instead of special-casing
+        // the stripper to keep an unused module just for a component
+        // we'd discard immediately anyway. Winding doesn't matter — the
+        // shader itself sets Cull Off.
         private static void CreateGalaxyBackground()
         {
-            var backgroundObject = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            backgroundObject.name = "GalaxyBackground";
-            Object.Destroy(backgroundObject.GetComponent<Collider>());
+            var backgroundObject = new GameObject("GalaxyBackground", typeof(MeshFilter), typeof(MeshRenderer));
+
+            var mesh = new Mesh
+            {
+                vertices = new[]
+                {
+                    new Vector3(-0.5f, -0.5f, 0f),
+                    new Vector3(0.5f, -0.5f, 0f),
+                    new Vector3(0.5f, 0.5f, 0f),
+                    new Vector3(-0.5f, 0.5f, 0f)
+                },
+                uv = new[]
+                {
+                    new Vector2(0f, 0f),
+                    new Vector2(1f, 0f),
+                    new Vector2(1f, 1f),
+                    new Vector2(0f, 1f)
+                },
+                triangles = new[] { 0, 1, 2, 0, 2, 3 }
+            };
+            mesh.RecalculateBounds();
+            backgroundObject.GetComponent<MeshFilter>().sharedMesh = mesh;
+
             backgroundObject.transform.localScale = new Vector3(GalaxyBackgroundSize, GalaxyBackgroundSize, 1f);
             backgroundObject.GetComponent<MeshRenderer>().sharedMaterial = new Material(Shader.Find("StarBound/GalaxyBackground"));
         }

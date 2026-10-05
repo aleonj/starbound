@@ -270,7 +270,7 @@ namespace StarBound.Demo
         // tap apart from the start of a pan/pinch drag.
         private void OnMapTapped(Vector2 screenPosition)
         {
-            if (match == null || selectedDie == null || !match.CanMove)
+            if (match == null)
                 return;
 
             var camera = Camera.main;
@@ -281,10 +281,19 @@ namespace StarBound.Demo
             var worldPoint = camera.ScreenToWorldPoint(new Vector3(screenPosition.x, screenPosition.y, distanceFromCamera));
             var targetCoordinate = HexLayout.WorldToAxial(worldPoint, hexRadius);
 
-            // Illegal targets aren't selectable at all — no attempted
-            // move, no error message, just ignored.
-            if (!ComputeLegalTargets(selectedDie).Contains(targetCoordinate))
+            if (!match.Map.TryGetHex(targetCoordinate, out var hex))
+                return; // tapped outside the map entirely
+
+            // A tap on anything that isn't a legal move target used to be
+            // silently ignored — that's exactly the gap a "what's here"
+            // info popup fills, without touching the existing move-
+            // selection behavior below at all.
+            var isLegalMoveTarget = selectedDie != null && match.CanMove && ComputeLegalTargets(selectedDie).Contains(targetCoordinate);
+            if (!isLegalMoveTarget)
+            {
+                ShowHexInfo(hex);
                 return;
+            }
 
             // Tapping any other legal hex while one's already pending just
             // switches the pending target — no need to Cancel first.
@@ -295,6 +304,88 @@ namespace StarBound.Demo
             pendingTarget = targetCoordinate;
             lastMessage = null;
             RefreshView();
+        }
+
+        // "What's here" info popup — reuses the shared PopupDialog rather
+        // than a bespoke screen, since this is a single-button read-only
+        // alert, exactly what ShowAlert already exists for. Engagement
+        // presence is filtered through EngagementVisibility the same way
+        // the map's own marker is, so tapping an undiscovered hex can't
+        // leak that there's something there ahead of actually finding it.
+        private void ShowHexInfo(Hex hex)
+        {
+            var title = !string.IsNullOrEmpty(hex.Name) ? hex.Name : DescribeTerrainName(hex.Terrain);
+            popupDialog.ShowAlert(title, DescribeHexDetails(hex));
+        }
+
+        private static string DescribeTerrainName(TerrainType terrain) => terrain switch
+        {
+            TerrainType.ClearSpace => "Open Space",
+            TerrainType.Asteroids => "Asteroid Field",
+            TerrainType.Wormhole => "Wormhole",
+            TerrainType.Tradelane => "Tradelane",
+            TerrainType.Mines => "Minefield",
+            TerrainType.Debris => "Debris Field",
+            TerrainType.PlanetOrStarport => "Planet",
+            _ => terrain.ToString()
+        };
+
+        // Formats a HazardChances probability as "1 in N" — derived from
+        // the same constants Match's actual dice roll uses (see
+        // Match.ApplyHazardDamageIfUnlucky), so this can never drift out
+        // of sync with the real odds.
+        private static string DescribeOdds(double chance) => $"1 in {Math.Round(1.0 / chance)}";
+
+        private string DescribeHexDetails(Hex hex)
+        {
+            var lines = new List<string>();
+
+            switch (hex.Terrain)
+            {
+                case TerrainType.ClearSpace:
+                    lines.Add("Empty space. Nothing here.");
+                    break;
+                case TerrainType.Asteroids:
+                    lines.Add($"{DescribeOdds(HazardChances.AsteroidDamageChance)} chance of hull damage on arrival.");
+                    break;
+                case TerrainType.Mines:
+                    var minefieldAlertActive = match.ActiveVariable == MatchVariable.MinefieldDamage;
+                    var mineChance = minefieldAlertActive ? HazardChances.MinefieldDamageChanceDuringAlert : HazardChances.MinefieldDamageChance;
+                    lines.Add($"{DescribeOdds(mineChance)} chance of hull damage on arrival.");
+                    if (minefieldAlertActive)
+                        lines.Add("A Minefield Alert is currently raising the odds.");
+                    break;
+                case TerrainType.Debris:
+                    // Not considered hazardous — see [Design] What is
+                    // special about Debris, still an open discussion.
+                    lines.Add("A field of drifting debris.");
+                    break;
+                case TerrainType.Wormhole:
+                    lines.Add("Requires a Wormhole Device to travel through.");
+                    break;
+                case TerrainType.Tradelane:
+                    lines.Add($"Costs {TollPricing.TradelaneTollPerHex} gold per hex to travel along.");
+                    break;
+                case TerrainType.PlanetOrStarport:
+                    lines.Add(hex.IsStarport
+                        ? "Starport. Restock at its shop, or pick up local jobs."
+                        : "Planet. Restock at its shop, or pick up local jobs.");
+                    break;
+            }
+
+            var visibleTier = EngagementVisibility.GetVisibleTier(hex, match.CurrentPlayer.DiscoveredEngagementHexes);
+            if (visibleTier != EngagementTier.None)
+                lines.Add($"An engagement is present here (Tier: {visibleTier}).");
+
+            // "Your" ship, not the current player's name — this is a
+            // pass-and-play game, so whoever is looking at the screen
+            // right now IS match.CurrentPlayer.
+            if (hex.Coordinate == match.CurrentPlayer.Position)
+                lines.Add("Your ship is here.");
+            if (hex.Coordinate == match.OtherPlayer.Position)
+                lines.Add($"{match.OtherPlayer.DisplayName}'s ship is here.");
+
+            return string.Join("\n\n", lines);
         }
 
         // Used by MapCameraController to reject a gesture that starts over

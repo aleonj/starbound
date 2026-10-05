@@ -14,7 +14,7 @@ namespace StarBound.Combat
             if (!player.Ship.IsIntegrityDepleted)
                 return false;
 
-            player.Ship.ClearMoneyAndItems();
+            player.Ship.ClearMoneyAndNonPermanentItems();
             player.Ship.ResetIntegrityStats();
 
             var nearestPlanet = FindNearestPlanetOrStarport(map, player.Position);

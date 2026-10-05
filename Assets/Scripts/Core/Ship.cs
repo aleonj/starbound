@@ -112,20 +112,29 @@ namespace StarBound.Core
             Money = Math.Max(0, Money - amount);
         }
 
-        // [Combat] Zero Hull/Energy penalty: clear money & items on relocation.
-        public void ClearMoneyAndItems()
+        // [Combat] Zero Hull/Energy penalty: clear money & non-Permanent
+        // items on relocation. Permanent stat upgrades are earned gear,
+        // not spending money — deliberately survive a wipe (see the
+        // [Multiplayer] game-progression story's 2026-09-29 finding:
+        // wiping them on every single loss, even a lucky bad roll at
+        // Easy tier, meant no advantage could ever survive long enough to
+        // compound toward a genuinely hard fight). Consumables and Unlock
+        // items still get cleared, same as money — they're spent
+        // resources, not a standing investment.
+        public void ClearMoneyAndNonPermanentItems()
         {
             Money = 0;
-            heldItems.Clear();
+            heldItems.RemoveAll(item => item.Kind != ItemKind.Permanent);
         }
 
         // [Combat] Bug: Hull/Energy not reset after zero-integrity penalty
         // — without this, a depleted player was left stuck at 0 Hull/
-        // Energy with no money to repair either (see ClearMoneyAndItems
-        // above), unable to meaningfully continue. Resets both stats
-        // together, not just whichever one triggered the penalty, since
-        // this is a fresh start after respawning — same "everything reset"
-        // treatment as the money/items wipe.
+        // Energy with no money to repair either (see
+        // ClearMoneyAndNonPermanentItems above), unable to meaningfully
+        // continue. Resets both stats together, not just whichever one
+        // triggered the penalty, since this is a fresh start after
+        // respawning — same "everything reset" treatment as the
+        // money/consumables wipe.
         public void ResetIntegrityStats()
         {
             stats[CoreStat.Hull] = DefaultStatValue;

@@ -19,6 +19,7 @@ namespace StarBound.UI
         // to, so the dialog must out-rank it or it renders hidden behind
         // an opaque screen that's still on top.
         private const int SortingOrder = 195;
+        private const float PanelWidth = 320f;
 
         private static readonly Color ConfirmColor = new(0.2f, 0.7f, 0.3f);
         private static readonly Color CancelColor = new(0.7f, 0.25f, 0.25f);
@@ -30,12 +31,22 @@ namespace StarBound.UI
         private Text titleText;
         private Text messageText;
         private Transform buttonRow;
+        private RectTransform panelRect;
+        private Material panelMaterial;
 
         private void Awake()
         {
             BuildUI();
             Hide();
         }
+
+        // Rounded-corner glass math (see GlassPanelMaterials) needs the
+        // panel's actual current size, which its own ContentSizeFitter
+        // changes every time the title/message/button count changes —
+        // same reason every other glass-panel screen (WinScreen,
+        // SettingsScreen, etc.) syncs this from LateUpdate rather than
+        // once at build time.
+        private void LateUpdate() => ScreenChromeKit.SyncPanelSize(panelMaterial, panelRect);
 
         public void ShowConfirmation(string title, string message, string confirmLabel, Action onConfirm, string cancelLabel = "Cancel", Action onCancel = null) =>
             Show(title, message, (confirmLabel, ConfirmColor, onConfirm), (cancelLabel, CancelColor, onCancel));
@@ -59,7 +70,8 @@ namespace StarBound.UI
 
             foreach (var button in buttons)
             {
-                var uiButton = CreateButton(buttonRow, button.Label, button.Color);
+                var (uiButton, _, _) = ScreenChromeKit.CreateButton(buttonRow, button.Label, button.Color,
+                    interactable: true, GlassPanelMaterials.Style.Button, width: 130f, height: 48f, fontSize: 16);
                 var callback = button.Callback;
                 uiButton.onClick.AddListener(() =>
                 {
@@ -73,30 +85,15 @@ namespace StarBound.UI
 
         private void BuildUI()
         {
-            // Was a hand-rolled ConstantPixelSize canvas sized in raw
-            // pixels (panel 500x300, fontSize 30/22, buttons 180x70) —
-            // never actually exercised until Forfeit became its first
-            // real caller, which is when the mismatch surfaced: on a
-            // point-scale device the dialog rendered a fraction of its
-            // intended size, the exact "1/3 the intended size on a real
-            // device" bug MatchHudChrome's own header comment already
-            // documents for this exact ConstantPixelSize-vs-point-scale
-            // mistake. Now built on ScreenChromeKit's canvas (same
-            // ScaleWithScreenSize/400x866 reference every other screen
-            // uses) with every size rescaled to match — this file
-            // predates ScreenChromeKit's extraction, which is why it
-            // still hand-rolls its own CreateText/CreateButton below
-            // rather than reusing the kit's, but the canvas/scale mode
-            // itself has to match or every screen drifts out of scale
-            // with each other again.
             var (_, canvasRect) = ScreenChromeKit.CreateCanvas(transform, "PopupDialogCanvas", SortingOrder);
 
             // Full-screen, translucent — dims whatever's behind without
-            // fully hiding it (unlike TurnHandoffScreen's opaque
-            // background, which exists specifically to hide everything).
-            // Also blocks clicks from reaching the map/HUD underneath
-            // while a dialog is up, since it has an Image (raycast target
-            // by default) covering the whole screen.
+            // fully hiding it (unlike ScreenChromeKit.CreateOpaqueBackground,
+            // which exists specifically to hide everything, e.g. behind a
+            // full pre-match flow screen). Also blocks clicks from
+            // reaching the map/HUD underneath while a dialog is up, since
+            // it has an Image (raycast target by default) covering the
+            // whole screen.
             background = new GameObject("DimBackground", typeof(RectTransform), typeof(Image));
             background.transform.SetParent(canvasRect, false);
             var backgroundRect = background.GetComponent<RectTransform>();
@@ -106,27 +103,18 @@ namespace StarBound.UI
             backgroundRect.offsetMax = Vector2.zero;
             background.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.6f);
 
-            var panel = new GameObject("Panel", typeof(RectTransform), typeof(Image), typeof(VerticalLayoutGroup), typeof(ContentSizeFitter));
-            panel.transform.SetParent(background.transform, false);
-            var panelRect = panel.GetComponent<RectTransform>();
-            panelRect.anchorMin = new Vector2(0.5f, 0.5f);
-            panelRect.anchorMax = new Vector2(0.5f, 0.5f);
-            panelRect.pivot = new Vector2(0.5f, 0.5f);
-            panelRect.sizeDelta = new Vector2(320f, panelRect.sizeDelta.y);
-            panel.GetComponent<Image>().color = new Color(0.12f, 0.12f, 0.16f, 1f);
-            panel.GetComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            // Same rounded, rim-glowing glass look every other screen
+            // uses (see ScreenChromeKit.CreateGlassPanel) — this used to
+            // be a flat-colored rect with plain Text/Button children,
+            // which read as noticeably plainer than the rest of the UI
+            // once this became a frequent, ordinary interaction (the hex
+            // info popup) rather than a rare confirmation.
+            var (panel, rect, material) = ScreenChromeKit.CreateGlassPanel(background.transform, PanelWidth, ScreenChromeKit.AccentColor);
+            panelRect = rect;
+            panelMaterial = material;
 
-            var layout = panel.GetComponent<VerticalLayoutGroup>();
-            layout.spacing = 16f;
-            layout.padding = new RectOffset(20, 20, 20, 20);
-            layout.childAlignment = TextAnchor.MiddleCenter;
-            layout.childForceExpandWidth = false;
-            layout.childForceExpandHeight = false;
-            layout.childControlWidth = true;
-            layout.childControlHeight = true;
-
-            titleText = CreateText(panel.transform, fontSize: 22, height: 30f);
-            messageText = CreateText(panel.transform, fontSize: 16, height: 60f);
+            titleText = ScreenChromeKit.CreateText(panel.transform, string.Empty, fontSize: 22, bold: true);
+            messageText = ScreenChromeKit.CreateText(panel.transform, string.Empty, fontSize: 16);
 
             var buttonRowObject = new GameObject("ButtonRow", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
             buttonRowObject.transform.SetParent(panel.transform, false);
@@ -143,55 +131,6 @@ namespace StarBound.UI
             rowLayout.childControlHeight = false;
 
             buttonRow = buttonRowObject.transform;
-        }
-
-        private static Text CreateText(Transform parent, int fontSize, float height)
-        {
-            var textObject = new GameObject("Text", typeof(RectTransform), typeof(Text), typeof(LayoutElement));
-            textObject.transform.SetParent(parent, false);
-
-            var layoutElement = textObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 280f;
-            layoutElement.preferredHeight = height;
-
-            var text = textObject.GetComponent<Text>();
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.fontSize = fontSize;
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.horizontalOverflow = HorizontalWrapMode.Wrap;
-            text.verticalOverflow = VerticalWrapMode.Overflow;
-
-            return text;
-        }
-
-        private static Button CreateButton(Transform parent, string label, Color color)
-        {
-            var buttonObject = new GameObject(label + "Button", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
-            buttonObject.transform.SetParent(parent, false);
-            buttonObject.GetComponent<RectTransform>().sizeDelta = new Vector2(130f, 48f);
-            buttonObject.GetComponent<Image>().color = color;
-
-            var layoutElement = buttonObject.GetComponent<LayoutElement>();
-            layoutElement.preferredWidth = 130f;
-            layoutElement.preferredHeight = 48f;
-
-            var textObject = new GameObject("Label", typeof(RectTransform), typeof(Text));
-            textObject.transform.SetParent(buttonObject.transform, false);
-            var textRect = textObject.GetComponent<RectTransform>();
-            textRect.anchorMin = Vector2.zero;
-            textRect.anchorMax = Vector2.one;
-            textRect.offsetMin = Vector2.zero;
-            textRect.offsetMax = Vector2.zero;
-
-            var text = textObject.GetComponent<Text>();
-            text.text = label;
-            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            text.alignment = TextAnchor.MiddleCenter;
-            text.color = Color.white;
-            text.fontSize = 16;
-
-            return buttonObject.GetComponent<Button>();
         }
     }
 }

@@ -163,6 +163,28 @@ namespace StarBound.Map
             meshRenderer.SetPropertyBlock(propertyBlock);
         }
 
+        // Per-instance data for PlanetSpin.shader — Planet and Starport
+        // share one cached material (see TerrainMaterials), so which look
+        // a given hex gets has to ride along on a MaterialPropertyBlock
+        // rather than picking a different Material. A property block
+        // survives SetState's repeated `sharedMaterial = ...` reassignment
+        // to that same cached instance (it's stored on the renderer, not
+        // the material), which is exactly why this pattern — not two
+        // separate cached materials swapped per-instance — was chosen:
+        // swapping materials would get silently undone the next time
+        // SetState runs. Terrain/role never changes after map generation,
+        // so, like SetConnectionMask, this only needs to be set once — see
+        // MapView.Render, which calls this only when a PlanetOrStarport
+        // tile is first created.
+        public void SetIsStarport(bool isStarport)
+        {
+            propertyBlock ??= new MaterialPropertyBlock();
+            var meshRenderer = GetComponent<MeshRenderer>();
+            meshRenderer.GetPropertyBlock(propertyBlock);
+            propertyBlock.SetFloat("_IsStarport", isStarport ? 1f : 0f);
+            meshRenderer.SetPropertyBlock(propertyBlock);
+        }
+
         // `== null` (not just TryGetValue) because a destroyed
         // UnityEngine.Object isn't a real C# null reference — with Domain
         // Reload disabled in Enter Play Mode Settings, these static caches

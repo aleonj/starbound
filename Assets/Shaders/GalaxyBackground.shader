@@ -55,8 +55,13 @@ Shader "StarBound/GalaxyBackground"
                 // no star (it returns (0,0,0) there), so the background
                 // has to match exactly or the seam between "inside a hex"
                 // and "the gaps/outside the grid" is visible as a tonal
-                // mismatch instead of one continuous galaxy.
-                return float4(StarBoundStarfield(IN.worldPos), 1.0);
+                // mismatch instead of one continuous galaxy. The parallax
+                // star layers and nebula both live inside
+                // StarBoundStarfield itself (see GlassHexCommon.hlsl) for
+                // exactly this reason — every hex's own glass tile calls
+                // the same function, so there's no separate "background-
+                // only" layer to go out of sync with.
+                return float4(saturate(StarBoundStarfield(IN.worldPos)), 1.0);
             }
             ENDHLSL
         }

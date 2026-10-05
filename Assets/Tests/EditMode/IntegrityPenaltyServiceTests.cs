@@ -7,7 +7,7 @@ namespace StarBound.Tests
     public class IntegrityPenaltyServiceTests
     {
         [Test]
-        public void ApplyIfDepleted_HullZero_ClearsMoneyItemsAndRelocatesToNearestPlanet()
+        public void ApplyIfDepleted_HullZero_ClearsMoneyAndConsumablesButKeepsPermanentItemsAndRelocates()
         {
             var map = new GameMap(radius: 2, Difficulty.Medium);
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace));
@@ -15,7 +15,9 @@ namespace StarBound.Tests
             map.SetHex(new Hex(new HexCoordinate(2, 0), TerrainType.PlanetOrStarport));
 
             var ship = new Ship(cargoCapacity: 3, startingMoney: 100);
-            ship.TryAddItem(new ItemDefinition("Weapons Upgrade +1", CoreStat.Weapons, 1, 50));
+            var upgrade = new ItemDefinition("Weapons Upgrade +1", CoreStat.Weapons, 1, 50, ItemKind.Permanent);
+            ship.TryAddItem(upgrade);
+            ship.TryAddItem(new ItemDefinition("Repair Kit", CoreStat.Hull, 2, 50, ItemKind.Consumable));
             ship.ApplyStatDelta(CoreStat.Hull, -3);
             var player = new Player("p1", "Test", ship) { Position = new HexCoordinate(0, 0) };
 
@@ -23,7 +25,9 @@ namespace StarBound.Tests
 
             Assert.IsTrue(applied);
             Assert.AreEqual(0, ship.Money);
-            Assert.AreEqual(0, ship.HeldItems.Count);
+            // A losing streak resets cash and consumables, but earned
+            // Permanent gear survives — see Ship.ClearMoneyAndNonPermanentItems.
+            CollectionAssert.AreEqual(new[] { upgrade }, ship.HeldItems);
             Assert.AreEqual(new HexCoordinate(2, 0), player.Position);
             Assert.AreEqual(Ship.DefaultStatValue, ship.GetStat(CoreStat.Hull),
                 "Depleted Hull must reset, not leave the player stuck at 0 with no money to repair.");

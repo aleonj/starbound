@@ -65,6 +65,12 @@ namespace StarBound.Map
                     // needs computing once, here, not on every Render pass.
                     if (hex.Terrain == TerrainType.Tradelane)
                         tileView.SetConnectionMask(ComputeTradelaneConnectionMask(map, hex.Coordinate));
+
+                    // Same one-time reasoning as above — a hex's Planet/
+                    // Starport role (see Hex.IsStarport) is fixed at
+                    // generation time too.
+                    if (hex.Terrain == TerrainType.PlanetOrStarport)
+                        tileView.SetIsStarport(hex.IsStarport);
                 }
 
                 tileView.SetState(hex.Terrain, visibleTier, highlightState);

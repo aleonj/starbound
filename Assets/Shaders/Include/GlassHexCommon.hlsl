@@ -155,14 +155,10 @@ void StarBoundWorley(float2 samplePos, out float f1, out float f2, out float cel
     }
 }
 
-// Sparse procedural starfield, sampled purely from world position with
-// no tunable parameters — every hex on the map calls this identically,
-// so the field is genuinely one continuous galaxy behind the glass, not
-// a per-tile pattern that happens to look similar. This is what makes
-// the map read as "glass overlaid on a living galaxy" rather than each
-// hex being its own self-contained scene — see GlassHex.shader and
-// AsteroidFlow.shader, which both composite this in as their backdrop.
-float3 StarBoundStarfield(float2 worldPos)
+// One layer of sparse procedural stars, sampled purely from world
+// position with no tunable parameters — used three times below (see
+// StarBoundStarfield) at different parallax offsets to fake depth.
+float3 StarBoundStarfieldLayer(float2 worldPos)
 {
     const float scale = 6.0;
     const float presentThreshold = 0.72; // roughly 28% of cells have a star
@@ -180,14 +176,76 @@ float3 StarBoundStarfield(float2 worldPos)
     float flickerHash = StarBoundHash2(cell + 12.3).x;
     float tintHash = StarBoundHash2(cell + 21.9).x;
 
-    float size = lerp(0.015, 0.06, sizeHash);
-    float brightness = lerp(0.35, 1.0, brightnessHash);
+    // Power-curved (not a plain lerp) so most stars stay small/dim and
+    // only a rare few land near the top of the range — a flat lerp gave
+    // every star roughly the same "medium" look; this gives occasional
+    // standout bright/large stars against a field of faint ones, closer
+    // to how a real starfield reads.
+    float size = lerp(0.01, 0.09, pow(sizeHash, 3.0));
+    float brightness = lerp(0.25, 1.5, pow(brightnessHash, 2.5));
     brightness *= lerp(0.75, 1.0, 0.5 + 0.5 * sin(_Time.y * lerp(0.4, 1.6, flickerHash) + flickerHash * STARBOUND_TWO_PI));
 
     float glow = smoothstep(size, 0.0, dist) * brightness * present;
 
     float3 tint = lerp(float3(0.7, 0.82, 1.0), float3(1.0, 0.88, 0.72), tintHash);
     return glow * tint;
+}
+
+// Set once per frame by MapCameraController (Shader.SetGlobalVector) —
+// the map camera's own world position. Used below to make two of the
+// three star layers sample a point that lags behind the true worldPos
+// by a fraction of how far the camera has panned: parallax, the classic
+// "distant things move less" depth cue. Global (not per-material) since
+// every terrain/background shader that calls StarBoundStarfield needs
+// the same value, without each one having to forward it through as an
+// argument.
+float4 _StarBoundCameraOffset;
+
+// Sparse procedural starfield — every hex on the map calls this
+// identically, so the field is genuinely one continuous galaxy behind
+// the glass, not a per-tile pattern that happens to look similar. This
+// is what makes the map read as "glass overlaid on a living galaxy"
+// rather than each hex being its own self-contained scene — see
+// GlassHex.shader and AsteroidFlow.shader, which both composite this in
+// as their backdrop, and GalaxyBackground.shader, which samples it
+// directly for the gaps outside the hex grid. The parallax star layers
+// live in here (rather than compositing them only in
+// GalaxyBackground.shader) so a hex's own glass tile shows the same
+// depth cue, not a flattened version of what's behind it. A nebula
+// layer was tried here too (colored, domain-warped fbm clouds) but
+// removed — a 3-octave hash-noise function can only produce smooth
+// round-ish blobs, not the filament/wisp structure a real nebula photo
+// has, and no amount of tuning color/opacity closed that gap.
+float3 StarBoundStarfield(float2 worldPos)
+{
+    float3 color = StarBoundStarfieldLayer(worldPos);
+    color += StarBoundStarfieldLayer(worldPos - _StarBoundCameraOffset.xy * 0.45 + 173.0) * 0.5;
+    color += StarBoundStarfieldLayer(worldPos - _StarBoundCameraOffset.xy * 0.75 + 419.0) * 0.3;
+    return color;
+}
+
+// A ring tilted into a fixed axis, then squashed along that axis by
+// cos(spinAngle) so it reads as tumbling in and out of the view plane,
+// exactly like a coin (or a gimbal ring) flipping end over end. Clamped
+// away from a zero squash so it never vanishes to a zero-thickness line
+// — a real ring still shows its rim edge-on. Shared by
+// TradelaneConnector.shader (two of these make its gyroscope
+// construction) and PlanetSpin.shader (one makes a Starport's docking
+// ring) — promoted here once it had its second user, same threshold the
+// rest of this file's primitives (e.g. StarBoundDomainWarp) already use.
+float3 StarBoundSpinningRing(float2 localPos, float radius, float thickness, float tiltAngle, float spinAngle, float3 ringColor)
+{
+    float c = cos(tiltAngle);
+    float s = sin(tiltAngle);
+    float2 tilted = float2(localPos.x * c - localPos.y * s, localPos.x * s + localPos.y * c);
+
+    float squash = max(0.12, abs(cos(spinAngle)));
+    tilted.y /= squash;
+
+    float ringDist = abs(length(tilted) - radius);
+    float halo = 1.0 - smoothstep(thickness * 0.5, thickness * 0.5 + 0.03, ringDist);
+    float core = 1.0 - smoothstep(thickness * 0.12, thickness * 0.3, ringDist);
+    return ringColor * (halo * 0.5 + core * 0.7);
 }
 
 #endif
