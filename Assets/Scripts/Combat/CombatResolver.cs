@@ -27,11 +27,13 @@ namespace StarBound.Combat
         public const int BraceEnergyCost = 1;
 
         // A single d10 + Speed check for one side — split out of
-        // ResolveInitiative below so PvP can run each side's roll as a
-        // genuinely separate action, one per player's own tap (see
-        // EngagementSession.RollPlayerInitiative/
-        // RollOpponentInitiativeAndDetermineAttacker), rather than both
-        // rolls happening silently as a side effect of whoever taps first.
+        // ResolveInitiative/ResolveEscapeAttempt below so PvP can run an
+        // Escape attempt as two genuinely separate rolls, one per side's
+        // own tap (see EngagementSession.BeginEscapeAttempt/
+        // ResolveEscapeIntercept), rather than both rolls happening
+        // silently as a side effect of whoever taps first. Initiative
+        // itself no longer needs this split in PvP — see
+        // EngagementSession's own class comment.
         public static (int Roll, int Total) RollSpeedCheck(Ship ship, Random rng)
         {
             var roll = rng.Next(1, 11); // d10: 1-10
@@ -89,7 +91,11 @@ namespace StarBound.Combat
             var defenseRoll = rng.Next(1, 11);
             var defenseTotal = defenseRoll + defenderShip.GetStat(CoreStat.Shields) + (braced ? BraceShieldBonus : 0);
 
-            var hitLanded = isCriticalHit || attackTotal >= defenseTotal;
+            // A tie goes to the defender — the attacker needs to actually
+            // beat the defense total, not just match it, for a non-crit
+            // hit to land. isCriticalHit's own natural-10 bypass is
+            // unaffected (short-circuits before this comparison matters).
+            var hitLanded = isCriticalHit || attackTotal > defenseTotal;
             var damage = hitLanded ? (isCriticalHit ? 2 : 1) : 0;
 
             if (damage > 0)

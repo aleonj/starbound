@@ -11,26 +11,31 @@ namespace StarBound.Combat
     // offer a Brace/Hold choice before the attack resolves. NPC fights
     // use exactly this — ResolveInitiative and the combined ResolveAttack.
     //
-    // PvP fights use split counterparts throughout instead, so every
-    // step is a real tap by whichever side it actually belongs to,
-    // rather than happening as a side effect of the other side's tap:
-    // RollPlayerInitiative/RollOpponentInitiativeAndDetermineAttacker for
-    // the roll itself, and DeclareDefense/ExecuteAttack for the
-    // attack — the defender commits to Brace/Hold first, then the
-    // attacker's own ExecuteAttack tap is what actually runs the roll.
-    // CanOpponentDecideDefense/AttemptOpponentEscape give the opponent
-    // their own symmetric moment when they're the one being targeted.
-    // Escape (either side's — the player's own pre-initiative attempt,
-    // or the opponent's post-initiative one) is split the same way:
-    // BeginEscapeAttempt/BeginOpponentEscapeAttempt only roll the
-    // escapee's own half; ResolveEscapeIntercept is the OTHER side's own
-    // tap that rolls their half and actually decides the outcome.
+    // PvP fights are shared-screen throughout (both sides watching the
+    // same device, no hand-off) and use split counterparts for anything
+    // that's a genuine per-side DECISION or needs each side's own tap for
+    // fairness — DeclareDefense/ExecuteAttack for the attack (the
+    // defender commits to Brace/Hold first, then the attacker's own
+    // ExecuteAttack tap actually runs the roll); CanOpponentDecideDefense/
+    // AttemptOpponentEscape give the opponent their own symmetric moment
+    // when they're the one being targeted; Escape (either side's — the
+    // player's own pre-initiative attempt, or the opponent's post-
+    // initiative one) splits the same way: BeginEscapeAttempt/
+    // BeginOpponentEscapeAttempt only roll the escapee's own half,
+    // ResolveEscapeIntercept is the OTHER side's own tap that rolls their
+    // half and actually decides the outcome.
+    //
+    // Initiative is the one exception: it's PURE forced RNG with no
+    // decision on either side (nobody chooses anything, nothing to hide),
+    // so PvP uses the exact same single-call ResolveInitiative NPC fights
+    // do, rather than a split pair of taps — there's no fairness reason
+    // to make the second side tap their own "roll" button for a result
+    // that's already fully determined by both ships' own stats the
+    // instant it's called.
     public class EngagementSession
     {
         private bool hasAttemptedEscapeThisRound;
         private RoundAttacker? pendingAttacker;
-        private int? pendingPlayerSpeedRoll;
-        private int? pendingPlayerSpeedTotal;
         private bool? pendingDefenderWantsBrace;
         private RoundAttacker? pendingEscapee;
         private int? pendingEscapeeSpeedRoll;
@@ -105,6 +110,9 @@ namespace StarBound.Combat
             return (roll, total);
         }
 
+        // Single call for both PvE and PvP alike — see this class's own
+        // doc comment for why Initiative doesn't get the split-tap
+        // treatment the other PvP mechanics do.
         public InitiativeResult ResolveInitiative(Random rng)
         {
             if (Outcome != EngagementOutcome.InProgress)
@@ -113,42 +121,6 @@ namespace StarBound.Combat
                 throw new InvalidOperationException("Initiative has already been resolved this round — call ResolveAttack next.");
 
             var result = CombatResolver.ResolveInitiative(PlayerShip, Opponent, rng);
-            pendingAttacker = result.Attacker;
-            return result;
-        }
-
-        // PvP-only split of the above into two genuinely separate rolls —
-        // one per player's own tap, rather than both happening silently
-        // from a single trigger (see MatchHud's device-hand-off
-        // orchestration). NPC fights keep using the single-call
-        // ResolveInitiative above unchanged.
-        public bool IsAwaitingOpponentInitiativeRoll => pendingPlayerSpeedRoll.HasValue;
-
-        public (int Roll, int Total) RollPlayerInitiative(Random rng)
-        {
-            if (Outcome != EngagementOutcome.InProgress)
-                throw new InvalidOperationException("This engagement has already ended.");
-            if (IsAwaitingAttackResolution)
-                throw new InvalidOperationException("Initiative has already been resolved this round — call ResolveAttack next.");
-            if (IsAwaitingOpponentInitiativeRoll)
-                throw new InvalidOperationException("The player's half of this round's Initiative roll has already happened — call RollOpponentInitiativeAndDetermineAttacker next.");
-
-            var (roll, total) = CombatResolver.RollSpeedCheck(PlayerShip, rng);
-            pendingPlayerSpeedRoll = roll;
-            pendingPlayerSpeedTotal = total;
-            return (roll, total);
-        }
-
-        public InitiativeResult RollOpponentInitiativeAndDetermineAttacker(Random rng)
-        {
-            if (!IsAwaitingOpponentInitiativeRoll)
-                throw new InvalidOperationException("Call RollPlayerInitiative before RollOpponentInitiativeAndDetermineAttacker.");
-
-            var (opponentRoll, opponentTotal) = CombatResolver.RollSpeedCheck(Opponent, rng);
-            var result = CombatResolver.DetermineInitiative(pendingPlayerSpeedRoll!.Value, pendingPlayerSpeedTotal!.Value, opponentRoll, opponentTotal);
-
-            pendingPlayerSpeedRoll = null;
-            pendingPlayerSpeedTotal = null;
             pendingAttacker = result.Attacker;
             return result;
         }
@@ -246,6 +218,37 @@ namespace StarBound.Combat
         public bool CanOpponentDecideDefense =>
             Outcome == EngagementOutcome.InProgress && IsPvP &&
             IsAwaitingDefenseDeclaration && PendingAttacker == RoundAttacker.Player;
+
+        // Single source of truth for "whose moment is this" in a PvP
+        // fight — used by EngagementScreen.RebuildActionRow (UI/
+        // EngagementScreen.cs) to decide which side's controls to show
+        // on the now-shared screen, and by MatchHud.RefreshEngagementScreen
+        // for the panel's accent-color tint. Null for a non-PvP or
+        // already-finished engagement (callers fall back to a neutral
+        // treatment). Deliberately written in the SAME order as
+        // RebuildActionRow's own dispatch chain — keep the two in
+        // lockstep if either ever grows a new case.
+        public RoundAttacker? ActiveDecisionMaker
+        {
+            get
+            {
+                if (!IsPvP || Outcome != EngagementOutcome.InProgress)
+                    return null;
+                if (IsAwaitingEscapeIntercept)
+                    return PendingEscapee == RoundAttacker.Player ? RoundAttacker.Opponent : RoundAttacker.Player;
+                // Pre-initiative is always the player's own moment now —
+                // Initiative resolves in a single call (see
+                // ResolveInitiative's own comment), so there's no longer
+                // a separate opponent-side sub-phase here to detect.
+                if (!IsAwaitingAttackResolution)
+                    return RoundAttacker.Player;
+                if (IsAwaitingAttackExecution)
+                    return PendingAttacker;
+                if (PendingAttacker == RoundAttacker.Opponent)
+                    return RoundAttacker.Player; // still declaring Brace/Hold
+                return RoundAttacker.Opponent; // CanOpponentDecideDefense — the only remaining case
+            }
+        }
 
         // Deliberately its own independent gate (CanOpponentDecideDefense,
         // not hasAttemptedEscapeThisRound) — this is a structurally

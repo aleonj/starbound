@@ -362,89 +362,12 @@ namespace StarBound.Tests
             Assert.AreEqual(EngagementOutcome.PlayerWon, session.Outcome);
         }
 
-        // --- RollPlayerInitiative / RollOpponentInitiativeAndDetermineAttacker (PvP's split roll) ---
-
-        [Test]
-        public void RollPlayerInitiative_SetsIsAwaitingOpponentInitiativeRollButNotAttackResolution()
-        {
-            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
-            var player = CreatePlayer();
-            var opponent = new Ship(cargoCapacity: 0);
-            var session = new EngagementSession(definition, player, opponent, isPvP: true);
-
-            session.RollPlayerInitiative(new Random(1));
-
-            Assert.IsTrue(session.IsAwaitingOpponentInitiativeRoll);
-            Assert.IsFalse(session.IsAwaitingAttackResolution);
-        }
-
-        [Test]
-        public void RollPlayerInitiative_CalledTwiceInSameRound_Throws()
-        {
-            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
-            var player = CreatePlayer();
-            var opponent = new Ship(cargoCapacity: 0);
-            var session = new EngagementSession(definition, player, opponent, isPvP: true);
-            session.RollPlayerInitiative(new Random(1));
-
-            Assert.Throws<InvalidOperationException>(() => session.RollPlayerInitiative(new Random(1)));
-        }
-
-        [Test]
-        public void RollOpponentInitiativeAndDetermineAttacker_WithoutPlayerRollFirst_Throws()
-        {
-            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
-            var player = CreatePlayer();
-            var opponent = new Ship(cargoCapacity: 0);
-            var session = new EngagementSession(definition, player, opponent, isPvP: true);
-
-            Assert.Throws<InvalidOperationException>(() => session.RollOpponentInitiativeAndDetermineAttacker(new Random(1)));
-        }
-
-        [Test]
-        public void RollOpponentInitiativeAndDetermineAttacker_SetsPendingAttackerAndClearsAwaitingFlag()
-        {
-            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
-            var player = CreatePlayer();
-            var opponent = new Ship(cargoCapacity: 0);
-            var session = new EngagementSession(definition, player, opponent, isPvP: true);
-
-            session.RollPlayerInitiative(new Random(1));
-            var result = session.RollOpponentInitiativeAndDetermineAttacker(new Random(1));
-
-            Assert.IsFalse(session.IsAwaitingOpponentInitiativeRoll);
-            Assert.IsTrue(session.IsAwaitingAttackResolution);
-            Assert.AreEqual(result.Attacker, session.PendingAttacker);
-        }
-
-        // The split path must consume the RNG in exactly the same order
-        // as the original single-call ResolveInitiative (player's roll,
-        // then opponent's) and produce an identical result given the same
-        // seed — this is what proves the split is a pure refactor of the
-        // same math, not a behavior change. Both calls share ONE Random
-        // instance, same as MatchHud's real usage (RollPlayerInitiative
-        // and RollOpponentInitiativeAndDetermineAttacker both draw from
-        // the same rng field there).
-        [Test]
-        public void SplitInitiativeRoll_ProducesTheSameResultAsResolveInitiative_GivenTheSameSeed()
-        {
-            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
-
-            var combinedSession = new EngagementSession(definition, CreatePlayer(), new Ship(cargoCapacity: 0));
-            var combinedResult = combinedSession.ResolveInitiative(new Random(7));
-
-            var splitSession = new EngagementSession(definition, CreatePlayer(), new Ship(cargoCapacity: 0), isPvP: true);
-            var splitRng = new Random(7);
-            splitSession.RollPlayerInitiative(splitRng);
-            var splitResult = splitSession.RollOpponentInitiativeAndDetermineAttacker(splitRng);
-
-            Assert.AreEqual(combinedResult.Attacker, splitResult.Attacker);
-            Assert.AreEqual(combinedResult.PlayerSpeedRoll, splitResult.PlayerSpeedRoll);
-            Assert.AreEqual(combinedResult.PlayerSpeedTotal, splitResult.PlayerSpeedTotal);
-            Assert.AreEqual(combinedResult.OpponentSpeedRoll, splitResult.OpponentSpeedRoll);
-            Assert.AreEqual(combinedResult.OpponentSpeedTotal, splitResult.OpponentSpeedTotal);
-            Assert.AreEqual(combinedResult.WasPlayerCriticalFailure, splitResult.WasPlayerCriticalFailure);
-        }
+        // Initiative no longer has a PvP-only split path — it's pure
+        // forced RNG with no decision on either side, so PvP uses the
+        // same single-call ResolveInitiative NPC fights do (see
+        // EngagementSession's own class comment). Coverage for that one
+        // shared method lives with the rest of ResolveInitiative's tests
+        // above; there's nothing split-specific left to test here.
 
         // --- DeclareDefense / ExecuteAttack (PvP's split attack resolution) ---
 
@@ -776,6 +699,127 @@ namespace StarBound.Tests
             Assert.AreEqual(combinedResult.OpponentRoll, splitResult.OpponentRoll);
             Assert.AreEqual(combinedResult.OpponentTotal, splitResult.OpponentTotal);
             Assert.AreEqual(combinedSession.Outcome, splitSession.Outcome);
+        }
+
+        // --- ActiveDecisionMaker (drives EngagementScreen's shared PvP
+        // screen — see the "[Multiplayer] PvP pass-and-play" story) ---
+
+        [Test]
+        public void ActiveDecisionMaker_NonPvP_IsNull()
+        {
+            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
+            var session = new EngagementSession(definition, CreatePlayer(), new Ship(cargoCapacity: 0));
+
+            Assert.IsNull(session.ActiveDecisionMaker);
+        }
+
+        [Test]
+        public void ActiveDecisionMaker_PvPPreRound_IsPlayer()
+        {
+            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
+            var session = new EngagementSession(definition, CreatePlayer(), new Ship(cargoCapacity: 0), isPvP: true);
+
+            Assert.AreEqual(RoundAttacker.Player, session.ActiveDecisionMaker);
+        }
+
+        [Test]
+        public void ActiveDecisionMaker_PlayerEscapeAttemptPending_IsOpponent()
+        {
+            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
+            var session = new EngagementSession(definition, CreatePlayer(), new Ship(cargoCapacity: 0), isPvP: true);
+            session.BeginEscapeAttempt(new Random(1));
+
+            Assert.AreEqual(RoundAttacker.Opponent, session.ActiveDecisionMaker);
+        }
+
+        [Test]
+        public void ActiveDecisionMaker_OpponentEscapeAttemptPending_IsPlayer()
+        {
+            var session = CreatePvPSessionWithOpponentDefending(out _);
+            session.BeginOpponentEscapeAttempt(new Random(1));
+
+            Assert.AreEqual(RoundAttacker.Player, session.ActiveDecisionMaker);
+        }
+
+        [Test]
+        public void ActiveDecisionMaker_OpponentMustDeclareDefense_IsOpponent()
+        {
+            var session = CreatePvPSessionWithOpponentDefending(out _);
+
+            Assert.AreEqual(RoundAttacker.Opponent, session.ActiveDecisionMaker);
+        }
+
+        [Test]
+        public void ActiveDecisionMaker_PlayerMustDeclareDefense_IsPlayer()
+        {
+            var session = CreatePvPSessionWithPlayerDefending(out _);
+
+            Assert.AreEqual(RoundAttacker.Player, session.ActiveDecisionMaker);
+        }
+
+        // Covers the exact ambiguity EngagementScreen.RebuildActionRow has
+        // to resolve too (see its own comment on why the attack-execution
+        // branch must be checked before PendingAttacker==Opponent): once
+        // defense is declared, PendingAttacker alone no longer tells you
+        // whether the PLAYER or the OPPONENT is the one who still needs
+        // to act — ActiveDecisionMaker must track it correctly for both.
+        [Test]
+        public void ActiveDecisionMaker_AwaitingAttackExecution_IsWhicheverSideWonInitiative()
+        {
+            var opponentDefendingSession = CreatePvPSessionWithOpponentDefending(out _);
+            opponentDefendingSession.DeclareDefense(wantsBrace: false);
+            Assert.AreEqual(RoundAttacker.Player, opponentDefendingSession.ActiveDecisionMaker);
+
+            var playerDefendingSession = CreatePvPSessionWithPlayerDefending(out _);
+            playerDefendingSession.DeclareDefense(wantsBrace: false);
+            Assert.AreEqual(RoundAttacker.Opponent, playerDefendingSession.ActiveDecisionMaker);
+        }
+
+        [Test]
+        public void ActiveDecisionMaker_EngagementFinished_IsNull()
+        {
+            var definition = EngagementDefinitionTable.For(EngagementTier.Hard);
+            var player = CreatePlayer();
+            BoostAllPerformanceStats(player.Ship, 20); // guaranteed hit whenever player has initiative
+            var opponentShip = new Ship(cargoCapacity: 0); // default Hull = 3
+            var session = new EngagementSession(definition, player, opponentShip, isPvP: true);
+            var rng = new Random(1);
+
+            var rounds = 0;
+            while (session.Outcome == EngagementOutcome.InProgress && rounds < 20)
+            {
+                session.ResolveInitiative(rng);
+                session.DeclareDefense(wantsBrace: false);
+                session.ExecuteAttack(rng);
+                rounds++;
+            }
+
+            Assert.AreEqual(EngagementOutcome.PlayerWon, session.Outcome);
+            Assert.IsNull(session.ActiveDecisionMaker);
+        }
+
+        // Symmetric counterpart to CreatePvPSessionWithOpponentDefending
+        // above — boosts the OPPONENT's stats instead, so the player ends
+        // up as the one who must declare Brace/Hold.
+        private static EngagementSession CreatePvPSessionWithPlayerDefending(out Ship opponentShip)
+        {
+            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
+            var player = CreatePlayer();
+            opponentShip = new Ship(cargoCapacity: 0);
+            BoostAllPerformanceStats(opponentShip, 20);
+            var session = new EngagementSession(definition, player, opponentShip, isPvP: true);
+
+            var rng = new Random(1);
+            var rounds = 0;
+            while (session.PendingAttacker != RoundAttacker.Opponent && rounds < 20)
+            {
+                session.ResolveInitiative(rng);
+                if (session.PendingAttacker != RoundAttacker.Opponent)
+                    session.ResolveAttack(rng);
+                rounds++;
+            }
+
+            return session;
         }
     }
 }
