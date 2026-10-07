@@ -273,9 +273,9 @@ namespace StarBound.Multiplayer
             CurrentPlayer.Position = result.NewPosition;
             hasMovedThisTurn = true; // see moveSessionPaid's own comment
             ConsumeActionForSession(ActionSession.Move);
-            HandleArrival(result.NewPosition, rng);
+            var hazardHit = HandleArrival(result.NewPosition, rng);
 
-            return result;
+            return MoveResult.Succeeded(result.NewPosition, hazardHit);
         }
 
         // Warps the player directly to any other wormhole hex on the map
@@ -301,8 +301,11 @@ namespace StarBound.Multiplayer
         // identically regardless of how the player got there: mark an
         // engagement hex as discovered by this player (see
         // Player.DiscoverHex — this is what makes it show on their view of
-        // the map), then trigger combat if the hex is guarded.
-        private void HandleArrival(HexCoordinate position, Random rng)
+        // the map), then trigger combat if the hex is guarded. Returns
+        // whether a hazard hit landed, so Move can report it back through
+        // MoveResult — TravelToWormhole ignores it (Wormhole terrain
+        // never rolls hazard damage, see ApplyHazardDamageIfUnlucky).
+        private bool HandleArrival(HexCoordinate position, Random rng)
         {
             Map.TryGetHex(position, out var hex);
 
@@ -318,7 +321,7 @@ namespace StarBound.Multiplayer
             // itself, before any relocation a depleted Hull might cause
             // (see IntegrityPenaltyService's documented "invoke after
             // anything that can deplete Hull/Energy" contract).
-            ApplyHazardDamageIfUnlucky(hex, rng);
+            var hazardHit = ApplyHazardDamageIfUnlucky(hex, rng);
 
             TryCompleteTravelAndPayGoal();
 
@@ -332,6 +335,8 @@ namespace StarBound.Multiplayer
                 activeEngagement = session;
                 ExhaustActions(); // an ambush spends the whole remaining budget
             }
+
+            return hazardHit;
         }
 
         // Asteroids and Mines each carry their own intrinsic damage
@@ -343,11 +348,14 @@ namespace StarBound.Multiplayer
         // at all. Asteroids stays the less dangerous of the two — it also
         // doubles as a mining opportunity (see CanMineAsteroid), Mines
         // has no upside at all. MinefieldDamage now intensifies the base
-        // Mines danger rather than being the sole source of it.
-        private void ApplyHazardDamageIfUnlucky(Hex hex, Random rng)
+        // Mines danger rather than being the sole source of it. Returns
+        // whether damage actually landed — callers used to have no way
+        // to tell the player it happened at all, so hazard damage was
+        // taken completely silently.
+        private bool ApplyHazardDamageIfUnlucky(Hex hex, Random rng)
         {
             if (hex == null)
-                return;
+                return false;
 
             var damageChance = hex.Terrain switch
             {
@@ -359,10 +367,11 @@ namespace StarBound.Multiplayer
             };
 
             if (damageChance <= 0.0 || rng.NextDouble() >= damageChance)
-                return;
+                return false;
 
             CurrentPlayer.Ship.ApplyStatDelta(CoreStat.Hull, -1);
-            IntegrityPenaltyService.ApplyIfDepleted(CurrentPlayer, Map);
+            IntegrityPenaltyService.ApplyIfDepleted(CurrentPlayer, Map, rng, out _); // hazard damage has no "winner" to credit
+            return true;
         }
 
         // First player to be standing on the goal's hex with enough money
@@ -741,7 +750,26 @@ namespace StarBound.Multiplayer
 
             if (activeEngagement.Outcome == EngagementOutcome.PlayerLost)
             {
-                IntegrityPenaltyService.ApplyIfDepleted(CurrentPlayer, Map);
+                IntegrityPenaltyService.ApplyIfDepleted(CurrentPlayer, Map, rng, out var moneyLost);
+                // PvP only — in PvE there's no real opponent to hand the
+                // loser's money to (what, if anything, should happen to
+                // it there is still an open question).
+                if (wasPvP && moneyLost > 0)
+                {
+                    OtherPlayer.Ship.AddMoney(moneyLost);
+                    // Same "tell them what happened" treatment as the
+                    // loser's own destruction notice — this overwrites
+                    // whatever OtherPlayer's notice slot already held,
+                    // but that's fine here: this engagement is the only
+                    // thing that could have just set one for them, and
+                    // it didn't (only the LOSER gets one from
+                    // ApplyIfDepleted). Deferred to OtherPlayer's own
+                    // next turn handoff, same as their own destruction
+                    // notice would be — they aren't the one holding the
+                    // device right now.
+                    OtherPlayer.SetPendingTurnStartNotice(
+                        $"You destroyed {CurrentPlayer.DisplayName}'s ship and claimed {moneyLost} money from the wreckage!");
+                }
             }
             else if (activeEngagement.Outcome == EngagementOutcome.PlayerEscaped)
             {
@@ -762,9 +790,24 @@ namespace StarBound.Multiplayer
 
             // The opponent is a real, persistent player here — a PvP loss
             // can deplete their Hull too, so they get the same zero-Hull
-            // relocation/penalty the active player would.
+            // relocation/penalty the active player would. If it actually
+            // did (i.e. CurrentPlayer just won), their money goes to
+            // CurrentPlayer rather than just vanishing — same reasoning
+            // as the symmetric PlayerLost branch above.
             if (wasPvP)
-                IntegrityPenaltyService.ApplyIfDepleted(OtherPlayer, Map);
+            {
+                IntegrityPenaltyService.ApplyIfDepleted(OtherPlayer, Map, rng, out var otherMoneyLost);
+                if (otherMoneyLost > 0)
+                {
+                    CurrentPlayer.Ship.AddMoney(otherMoneyLost);
+                    // CurrentPlayer IS the one holding the device right
+                    // now — OnEngagementContinueClicked already shows
+                    // whatever's in their notice slot immediately, same
+                    // as it would for their own destruction notice.
+                    CurrentPlayer.SetPendingTurnStartNotice(
+                        $"You destroyed {OtherPlayer.DisplayName}'s ship and claimed {otherMoneyLost} money from the wreckage!");
+                }
+            }
 
             if (CurrentPlayer.HasWonMatch)
                 Winner = CurrentPlayer;

@@ -1338,10 +1338,16 @@ namespace StarBound.Tests
             {
                 var (match, p1, _) = BuildProgressionMatch(); // ActiveVariable defaults to None — baseline chance applies
                 match.RollDice(new Random(1));
-                match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(seed));
+                var result = match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(seed));
 
                 if (p1.Ship.GetStat(CoreStat.Hull) == Ship.DefaultStatValue - 1)
+                {
+                    // The caller (MatchHud) needs this to actually tell
+                    // the player damage happened — it used to be taken
+                    // completely silently.
+                    Assert.IsTrue(result.HazardHit);
                     return;
+                }
             }
 
             Assert.Fail("Never rolled hull damage in 200 attempts at the baseline 1-in-5 Mines chance.");
@@ -1358,10 +1364,13 @@ namespace StarBound.Tests
             {
                 var (match, p1, _) = BuildProgressionMatch();
                 match.RollDice(new Random(1));
-                match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(seed));
+                var result = match.Move(new RolledDie(0, TerrainType.Mines), new HexCoordinate(1, 0), new Random(seed));
 
                 if (p1.Ship.GetStat(CoreStat.Hull) == Ship.DefaultStatValue)
+                {
+                    Assert.IsFalse(result.HazardHit);
                     return;
+                }
             }
 
             Assert.Fail("Hull damage occurred in all 200 attempts — Mines shouldn't be a guaranteed hit at a 1-in-5 chance.");

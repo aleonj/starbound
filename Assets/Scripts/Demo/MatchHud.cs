@@ -43,23 +43,15 @@ namespace StarBound.Demo
         private bool awaitingHandoff;
         private bool winScreenShown;
         private bool wasEngagementVisible;
-        // Mid-fight "pass the device" moments for symmetric PvP —
-        // deliberately separate from awaitingHandoff, which is the
-        // turn-boundary flow (camera recenter, OnHandoffConfirmed
-        // semantics) this isn't. deviceHolder tracks which side of the
-        // active engagement is actually holding the phone right now (only
-        // meaningful for PvP — NPC fights never move it off Player), so
-        // HandOffDeviceTo can tell whether a hand-off screen is actually
-        // needed or whether the right person already has it.
-        private bool awaitingEngagementHandoff;
-        private RoundAttacker deviceHolder;
         // Identifies a genuinely NEW engagement, as opposed to merely
-        // returning from a mid-fight hand-off screen — both produce the
-        // same "engagementVisible flips from false to true" edge that
-        // wasEngagementVisible alone can't tell apart. Conflating the two
-        // was a real bug: it reset deviceHolder to Player and wiped
-        // lastRoundBanner after EVERY hand-off, discarding exactly the
-        // state HandOffDeviceTo's own callback had just set correctly.
+        // returning to the (now always-visible, see the "[Multiplayer]
+        // PvP pass-and-play" story) engagement screen after an unrelated
+        // refresh — both produce the same "engagementVisible flips from
+        // false to true" edge that wasEngagementVisible alone can't tell
+        // apart. Used to gate the NPC portrait/stat-baseline setup in
+        // EngagementScreen.Refresh and to reset lastRoundBanner/
+        // lastEventDetail below, both of which should only happen once
+        // per actual fight, not on every incidental re-render.
         private EngagementSession trackedEngagementSession;
 
         private GameObject playerOneMarker;
@@ -71,6 +63,31 @@ namespace StarBound.Demo
         private const float MarkerEaseDuration = 0.35f;
         private Coroutine p1MarkerRoutine;
         private Coroutine p2MarkerRoutine;
+
+        // Heading rotation + bank/thruster "juice" layered on top of the
+        // position glide above — same retarget-in-place coroutine
+        // convention, kept as separate routines since rotation can finish
+        // independently of the position glide (e.g. a move that continues
+        // in the same direction has nothing to rotate to). Current heading
+        // is read back from the Transform itself rather than tracked in a
+        // parallel field (same reasoning as position: the Transform IS
+        // the state), which also sidesteps `ref` params being illegal on
+        // the iterator methods these drive. Bank/thruster visuals
+        // themselves live on ShipMarkerView (SetBankAmount/
+        // SetThrusterIntensity) now that ships are real sprite art rather
+        // than a custom shader — this just calls those each frame of the
+        // relevant coroutine.
+        private const float MarkerRotationDuration = 0.3f;
+        private const float MarkerMaxBankAmount = 0.6f;
+        // atan2's 0deg is world +X; a ship sprite's unrotated rest pose
+        // faces world +Y (see ShipMarkerView) — every heading this
+        // feature computes or reads back is offset by this constant to
+        // convert between the two conventions.
+        private const float MarkerDefaultHeadingDegrees = 90f;
+        private Coroutine p1MarkerRotationRoutine;
+        private Coroutine p2MarkerRotationRoutine;
+        private ShipMarkerView p1MarkerViewComponent;
+        private ShipMarkerView p2MarkerViewComponent;
 
         private RolledDie selectedDie;
         private HexCoordinate? pendingTarget;
@@ -87,27 +104,28 @@ namespace StarBound.Demo
         private IReadOnlyList<JobDefinition> jobOffer = Array.Empty<JobDefinition>();
         private bool jobOfferRolledThisTurn;
         private string lastMessage;
-        // The full sentence behind the round banner below (e.g. "Weapons:
-        // Player One rolled 5 = 8, Player Two's Shields rolled 10 = 13 —
-        // missed."), shown as its own line under the banner on
-        // EngagementScreen — replaces a scrolling combat log, which had
-        // the same problem the banner itself was built to fix: small text
-        // at the bottom, easy to miss entirely. Also doubles as the
-        // "Used X." feedback line when a consumable is used mid-fight,
-        // which isn't a roll but shares the same single-line slot.
+        // Now ONLY the "Used {item}." feedback line when a consumable is
+        // used mid-fight (see OnUseItemDuringEngagement) — the roll-math
+        // breakdown this used to carry (e.g. "Weapons: Player One rolled
+        // 5 = 8, Player Two's Shields rolled 10 = 13 — missed.") moved to
+        // lastRollDetail below as part of the "[UI] Show Weapons/Shields/
+        // Speed context..." story's compact icon-row redesign.
         private string lastEventDetail;
+        // The compact roll-math row shown on EngagementScreen (icon +
+        // roll+stat=total per side) — set by DescribeAttack/DescribeEscape/
+        // DescribeInitiative below, replacing the old full-sentence
+        // lastEventDetail for actual rolls. default(RollDetailInfo) means
+        // "nothing to show" (see that struct's own HasValue).
+        private RollDetailInfo lastRollDetail;
         // The most recent round's outcome, shown as a prominent banner on
         // EngagementScreen. Kind/DefenderIsPlayer drive EngagementScreen's
-        // own impact feedback (bar flash/panel shake/whiff shake) — Info
-        // for non-attack banners (Escape/Initiative), which get none of
-        // that. DefenderIsPlayer is meaningless when Kind is Info.
+        // own portrait animations (shot/lunge/impact/dodge, flee, ready
+        // pulse) — every real event kind now has one; Info is reserved
+        // for this field's own "nothing has happened yet" rest state
+        // (empty text, never actually shown). DefenderIsPlayer's meaning
+        // shifts per Kind — see RoundBannerKind's own doc comment.
         private (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) lastRoundBanner =
             (string.Empty, Color.white, RoundBannerKind.Info, false);
-        private static readonly Color BannerMissColor = new(0.6f, 0.6f, 0.65f);
-        private static readonly Color BannerHitColor = new(0.85f, 0.35f, 0.25f);
-        private static readonly Color BannerCritColor = new(1f, 0.82f, 0.2f);
-        private static readonly Color BannerEscapeColor = new(0.3f, 0.75f, 0.85f);
-        private static readonly Color BannerInitiativeColor = new(0.6f, 0.65f, 0.95f);
         private MatchHudChrome chrome;
         private EngagementScreen engagementScreen;
         private ShopScreen shopScreen;
@@ -133,15 +151,14 @@ namespace StarBound.Demo
         // — see RenderBuild/RenderReview's own callers below for exactly
         // when each transition happens.
         private bool showTradeBuilder;
-        // Mid-negotiation "pass the device" moments — a parallel,
-        // Player-typed version of the mid-fight PvP deviceHolder/
-        // HandOffDeviceTo/awaitingEngagementHandoff mechanism above (see
-        // that trio's own comments for the full reasoning; this doesn't
-        // reuse them directly since they're typed to RoundAttacker/
-        // EngagementSession). Doesn't touch awaitingHandoff or
-        // Match.CurrentPlayer — the initiator's own match turn never
-        // actually ends during a negotiation, same as it doesn't during a
-        // PvP fight.
+        // Mid-negotiation "pass the device" moments — trade negotiation
+        // still uses a mid-interaction hand-off screen (unlike PvP
+        // engagements now, see the "[Multiplayer] PvP pass-and-play"
+        // story) since a trade's own back-and-forth doesn't have a
+        // shared-view combat scene to build this pattern around yet.
+        // Doesn't touch awaitingHandoff or Match.CurrentPlayer — the
+        // initiator's own match turn never actually ends during a
+        // negotiation, same as it doesn't during a PvP fight.
         private bool awaitingTradeHandoff;
         private Player tradeDeviceHolder;
         // Reset-tracking mirror of trackedEngagementSession — see that
@@ -261,6 +278,18 @@ namespace StarBound.Demo
             // cased for match start).
             cameraController.PanTo(HexLayout.AxialToWorld(match.CurrentPlayer.Position, hexRadius));
             RefreshView();
+
+            // A destroyed player (or, PvP only, a winner who just claimed
+            // the loser's money — see ResolveActiveEngagement) doesn't
+            // necessarily find out immediately — either can land on the
+            // OTHER player while THIS player is holding the device (see
+            // IntegrityPenaltyService) — so it waits here, right as the
+            // device is confirmed to be in THEIR hands for THEIR turn,
+            // same gating OnHandoffConfirmed already relies on for
+            // everything else in this method.
+            var notice = match.CurrentPlayer.ConsumePendingTurnStartNotice();
+            if (!string.IsNullOrEmpty(notice))
+                popupDialog.ShowAlert("Engagement Result", notice);
         }
 
         // Fired by MapCameraController once per completed tap (press +
@@ -406,25 +435,54 @@ namespace StarBound.Demo
 
             if (result.Success)
             {
-                lastMessage = null;
                 selectedDie = null;
+                match.Map.TryGetHex(match.CurrentPlayer.Position, out var arrivedHex);
 
                 // Landing on Wormhole terrain — whether via the guaranteed
                 // device die (see OnRollDiceClicked) or, same as before, a
                 // genuinely-rolled rare Wormhole face — immediately offers
                 // the destination picker as the natural next step, rather
                 // than requiring a separate action to open it.
-                if (match.Map.TryGetHex(match.CurrentPlayer.Position, out var arrivedHex) && arrivedHex.Terrain == TerrainType.Wormhole)
+                if (arrivedHex != null && arrivedHex.Terrain == TerrainType.Wormhole)
                     showWormholeDestinations = true;
+
+                // Hazard damage (see Match.ApplyHazardDamageIfUnlucky)
+                // used to be taken completely silently — the chance is
+                // real (1 in 10 for Asteroids, 1 in 5/2 for Mines), but
+                // with no toast and lastMessage always cleared here,
+                // there was never any way to tell it had actually
+                // happened short of noticing the Hull bar move.
+                lastMessage = result.HazardHit && arrivedHex != null
+                    ? $"Damaged by the {DescribeTerrainName(arrivedHex.Terrain)}! (-1 Hull)"
+                    : null;
+
+                // A hazard hit can deplete Hull outright (see
+                // IntegrityPenaltyService) — same "show it now, not on
+                // some future handoff" treatment OnEngagementContinueClicked
+                // already gives a combat destruction, since CurrentPlayer
+                // is the one holding the device this instant. Supersedes
+                // the plain hazard toast above — Hull's already been
+                // reset by the time this fires, so "-1 Hull" would read
+                // as stale next to "ship destroyed."
+                var pendingNotice = match.CurrentPlayer.ConsumePendingTurnStartNotice();
+                if (!string.IsNullOrEmpty(pendingNotice))
+                {
+                    lastMessage = null;
+                    popupDialog.ShowAlert("Engagement Result", pendingNotice);
+                }
             }
             else
             {
-                // Shouldn't normally happen since the target came from
-                // ComputeLegalTargets, but a Tradelane toll the player can
-                // no longer afford (say, after an intervening purchase)
-                // can still fail here — keep the die selected so they can
-                // pick a different target instead of losing their turn.
-                lastMessage = $"Can't move there ({result.FailureReason}).";
+                // Not actually a rare edge case — ComputeLegalTargets
+                // filters candidates purely by terrain match, with no
+                // affordability check, so an unaffordable Tradelane toll
+                // (MoveFailureReason.InsufficientFundsForToll) is
+                // routinely offered as a "legal" target and fails here.
+                // Keep the die selected so the player can pick a
+                // different target instead of losing their turn, and
+                // explain why rather than leaving the tap looking like
+                // it silently did nothing.
+                lastMessage = $"Can't move there — {Describe(result.FailureReason)}.";
             }
 
             RefreshView();
@@ -478,16 +536,22 @@ namespace StarBound.Demo
         }
 
         // Engagement round-by-round handlers — each mutates domain state,
-        // sets lastEventDetail, then advances (which refreshes the
-        // screen, possibly via a device hand-off first — see
-        // AdvanceAfterRoundAction/AdvanceAfterInitiative). Deliberately
-        // NOT a per-frame refresh from Update(): an earlier version
-        // rebuilt EngagementScreen's action buttons via DestroyImmediate
-        // every single frame while visible, which broke click detection
-        // entirely — Unity's Button needs the SAME GameObject to receive
-        // both the pointer-down and pointer-up, and recreating it
-        // mid-click meant no click ever completed. Same "rebuild only on
-        // an actual state change" discipline the dice bar already uses.
+        // sets lastRollDetail (and lastEventDetail for item-use feedback),
+        // then refreshes the screen directly.
+        // PvP fights no longer hand the device off mid-fight (see the
+        // "[Multiplayer] PvP pass-and-play" story) — EngagementScreen.
+        // RebuildActionRow reads EngagementSession's own state (via
+        // ActiveDecisionMaker and the various IsAwaiting*/CanOpponent*
+        // properties) to decide which side's controls to show on this
+        // one shared screen, so a mutation followed by a plain refresh is
+        // all any of these need now. Deliberately NOT a per-frame refresh
+        // from Update(): an earlier version rebuilt EngagementScreen's
+        // action buttons via DestroyImmediate every single frame while
+        // visible, which broke click detection entirely — Unity's Button
+        // needs the SAME GameObject to receive both the pointer-down and
+        // pointer-up, and recreating it mid-click meant no click ever
+        // completed. Same "rebuild only on an actual state change"
+        // discipline the dice bar already uses.
         private void OnAttemptEscapeClicked()
         {
             var session = match.ActiveEngagement;
@@ -502,22 +566,25 @@ namespace StarBound.Demo
             {
                 var result = session.AttemptEscape(rng);
                 var labels = GetCombatLogLabels(session);
-                lastEventDetail = DescribeEscape(result, labels.PlayerLabel, labels.OpponentLabel);
-                lastRoundBanner = DescribeEscapeBanner(result, labels.PlayerLabel);
-                AdvanceAfterRoundAction();
+                var (playerColor, _) = GetEngagementAccentColors(session);
+                lastRollDetail = DescribeEscape(result, escapeeIsPlayer: true);
+                lastRoundBanner = DescribeEscapeBanner(result, labels.PlayerLabel, escapeeIsPlayer: true, playerColor);
+                RefreshEngagementScreen();
                 return;
             }
 
             session.BeginEscapeAttempt(rng);
-            HandOffDeviceTo(RoundAttacker.Opponent, "Try to Stop Them!", ContinueEscapeIntercept);
+            RefreshEngagementScreen();
         }
 
         // Shared by both escape directions (the player's own pre-round
         // attempt above, and the opponent's post-initiative one in
-        // OnOpponentAttemptEscapeClicked below) — whoever the device was
-        // just handed to is the side being asked "did you catch them?",
-        // and their own tap is what actually rolls that half of the
-        // contested check (see EngagementSession.ResolveEscapeIntercept).
+        // OnOpponentAttemptEscapeClicked below) — PendingEscapee records
+        // which side is actually fleeing, so this works symmetrically
+        // regardless of which Begin* call started it; the OTHER side's
+        // own "Try to Stop Them!" tap on the shared screen is what
+        // actually rolls that half of the contested check (see
+        // EngagementSession.ResolveEscapeIntercept).
         private void ContinueEscapeIntercept()
         {
             var session = match.ActiveEngagement;
@@ -525,63 +592,29 @@ namespace StarBound.Demo
             var labels = GetCombatLogLabels(session);
             var escapeeLabel = escapee == RoundAttacker.Player ? labels.PlayerLabel : labels.OpponentLabel;
             var otherLabel = escapee == RoundAttacker.Player ? labels.OpponentLabel : labels.PlayerLabel;
+            var (playerColor, opponentColor) = GetEngagementAccentColors(session);
+            var escapeeColor = escapee == RoundAttacker.Player ? playerColor : opponentColor;
 
             var result = session.ResolveEscapeIntercept(rng);
-            lastEventDetail = DescribeEscape(result, escapeeLabel, otherLabel);
-            lastRoundBanner = DescribeEscapeBanner(result, escapeeLabel);
-            AdvanceAfterRoundAction();
+            lastRollDetail = DescribeEscape(result, escapeeIsPlayer: escapee == RoundAttacker.Player);
+            lastRoundBanner = DescribeEscapeBanner(result, escapeeLabel, escapee == RoundAttacker.Player, escapeeColor);
+            RefreshEngagementScreen();
         }
 
+        // Single call for PvE and PvP alike — Initiative is pure forced
+        // RNG with no decision on either side, so unlike Brace/Hold or
+        // Escape there's no fairness reason to make the second side tap
+        // their own "roll" button too (see EngagementSession's own class
+        // comment).
         private void OnRollInitiativeClicked()
         {
             var session = match.ActiveEngagement;
-
-            // NPC fights keep the original single-call roll — there's no
-            // second real player to hand the device to. PvP always splits
-            // it into two genuine per-player rolls (see EngagementSession)
-            // so the opponent's own Speed check is their own tap, not a
-            // side effect of the current player's.
-            if (!session.IsPvP)
-            {
-                var initiative = session.ResolveInitiative(rng);
-                var npcLabels = GetCombatLogLabels(session);
-                lastEventDetail = DescribeInitiative(initiative, npcLabels.PlayerLabel, npcLabels.OpponentLabel);
-                lastRoundBanner = DescribeInitiativeBanner(initiative, npcLabels.PlayerLabel, npcLabels.OpponentLabel);
-                RefreshEngagementScreen();
-                return;
-            }
-
-            session.RollPlayerInitiative(rng);
-            HandOffDeviceTo(RoundAttacker.Opponent, "Roll Initiative", ContinueOpponentInitiativeRoll);
-        }
-
-        private void ContinueOpponentInitiativeRoll()
-        {
-            var session = match.ActiveEngagement;
-            var initiative = session.RollOpponentInitiativeAndDetermineAttacker(rng);
+            var initiative = session.ResolveInitiative(rng);
             var labels = GetCombatLogLabels(session);
-            lastEventDetail = DescribeInitiative(initiative, labels.PlayerLabel, labels.OpponentLabel);
-            // Who won was previously only visible by reading the log line
-            // — easy to miss exactly like a round's hit/miss outcome was.
-            // Shown on whichever screen comes next (the defender's Brace/
-            // Hold choice, or the attacker's own hand-off), same banner
-            // slot the round-outcome banner already uses.
-            lastRoundBanner = DescribeInitiativeBanner(initiative, labels.PlayerLabel, labels.OpponentLabel);
-            AdvanceAfterInitiative();
-        }
-
-        // Whoever just lost initiative (the new defender) is the one with
-        // a real decision to make next. If that's the opponent, they
-        // already hold the device (they just rolled on the hand-off
-        // screen) — HandOffDeviceTo short-circuits with no extra screen,
-        // and they flow straight into their Escape/Brace/Hold choice,
-        // which reads as a natural "you rolled low, now what?" beat.
-        private void AdvanceAfterInitiative()
-        {
-            var defender = match.ActiveEngagement.PendingAttacker == RoundAttacker.Player
-                ? RoundAttacker.Opponent
-                : RoundAttacker.Player;
-            HandOffDeviceTo(defender, "Your Move", RefreshEngagementScreen);
+            var (playerColor, opponentColor) = GetEngagementAccentColors(session);
+            lastRollDetail = DescribeInitiative(initiative);
+            lastRoundBanner = DescribeInitiativeBanner(initiative, labels.PlayerLabel, labels.OpponentLabel, playerColor, opponentColor);
+            RefreshEngagementScreen();
         }
 
         private void OnBraceClicked() => DeclareOrResolveDefense(wantsBrace: true);
@@ -591,21 +624,19 @@ namespace StarBound.Demo
         // The player's own turn to attack (as opposed to defending
         // against the opponent's, which offers a Brace/Hold choice
         // first) never braces. PvP never reaches this handler at all —
-        // see CanOpponentDecideDefense/AdvanceAfterInitiative above.
+        // see CanOpponentDecideDefense/DeclareOrResolveDefense above.
         private void OnEngagementAttackClicked() => ResolveEngagementAttack(wantsBrace: false);
 
         // Shared by all four Brace/Hold buttons (current player defending
         // and opponent defending alike). NPC fights resolve immediately
-        // in one call — today's exact behavior, no hand-off, since
-        // there's no second real player to hand a tap to. PvP instead
-        // declares the choice, then hands the device to whichever side
-        // actually won initiative — their own "Attack!" tap on the
-        // hand-off screen is what triggers the roll directly (same
-        // pattern as the Initiative hand-off's own "Roll Initiative" tap
-        // — one tap, one action, not a hand-off into a second screen that
-        // asks for the same thing again), rather than the roll happening
-        // as a side effect of the defender's choice (see EngagementSession.
-        // DeclareDefense/ExecuteAttack).
+        // in one call — today's exact behavior, since there's no second
+        // real player to give a separate tap to. PvP instead declares
+        // the choice, then whichever side actually won initiative gets
+        // their own "Attack!" button on this same shared screen (see
+        // EngagementScreen.RebuildActionRow's IsAwaitingAttackExecution
+        // branch) — a real action for the attacker too, not something
+        // that just happens as a side effect of the defender's choice
+        // (see EngagementSession.DeclareDefense/ExecuteAttack).
         private void DeclareOrResolveDefense(bool wantsBrace)
         {
             var session = match.ActiveEngagement;
@@ -616,27 +647,29 @@ namespace StarBound.Demo
             }
 
             session.DeclareDefense(wantsBrace);
-            HandOffDeviceTo(session.PendingAttacker!.Value, "Attack!", OnExecuteAttackClicked);
+            RefreshEngagementScreen();
         }
 
         private void ResolveEngagementAttack(bool wantsBrace) =>
             LogAttackResultAndAdvance(match.ActiveEngagement.ResolveAttack(rng, wantsBrace));
 
-        // PvP-only — the attacker's own hand-off "Attack!" tap (see
-        // DeclareOrResolveDefense's HandOffDeviceTo call) is what actually
-        // runs the roll, after the defender has already declared their
-        // Brace/Hold choice. Not a button on EngagementScreen itself —
-        // there's no separate on-screen confirmation step, same as
-        // Roll Initiative's own hand-off tap doesn't get one either.
+        // PvP-only — the attacker's own "Attack!" tap on the shared
+        // screen (see EngagementScreen.RebuildActionRow's
+        // IsAwaitingAttackExecution branch), wired through
+        // DeclareOrResolveDefense having already declared the defender's
+        // Brace/Hold choice. Works for either side without needing to
+        // know which — ExecuteAttack reads PendingAttacker itself.
         private void OnExecuteAttackClicked() =>
             LogAttackResultAndAdvance(match.ActiveEngagement.ExecuteAttack(rng));
 
         private void LogAttackResultAndAdvance(RoundResult result)
         {
-            var labels = GetCombatLogLabels(match.ActiveEngagement);
-            lastEventDetail = DescribeAttack(result, labels.PlayerLabel, labels.PlayerPossessive, labels.OpponentLabel, labels.OpponentPossessive);
-            lastRoundBanner = DescribeRoundBanner(result, labels.PlayerLabel, labels.OpponentLabel);
-            AdvanceAfterRoundAction();
+            var session = match.ActiveEngagement;
+            var labels = GetCombatLogLabels(session);
+            var (playerColor, opponentColor) = GetEngagementAccentColors(session);
+            lastRollDetail = DescribeAttack(result);
+            lastRoundBanner = DescribeRoundBanner(result, labels.PlayerLabel, labels.OpponentLabel, playerColor, opponentColor);
+            RefreshEngagementScreen();
         }
 
         private void OnUseItemDuringEngagement(ItemDefinition item)
@@ -646,63 +679,17 @@ namespace StarBound.Demo
             RefreshEngagementScreen();
         }
 
-        // The general "who currently holds the phone" hand-off — used at
-        // every point control needs to move to the other side, not just
-        // one specific case. Reuses TurnHandoffScreen (already built for
-        // exactly "hand the device to X, they tap ready") with a
-        // mid-fight-appropriate button label each time, instead of a
-        // second full-screen component for the same physical gesture.
-        // Short-circuits with no visible screen when the right person
-        // already has it (e.g. the opponent, right after rolling their
-        // own Initiative).
-        private void HandOffDeviceTo(RoundAttacker holder, string readyLabel, Action onReady)
-        {
-            if (deviceHolder == holder)
-            {
-                onReady();
-                return;
-            }
-
-            var incomingPlayer = holder == RoundAttacker.Player ? match.CurrentPlayer : match.OtherPlayer;
-            awaitingEngagementHandoff = true;
-            handoffScreen.Show(incomingPlayer, () =>
-            {
-                awaitingEngagementHandoff = false;
-                handoffScreen.Hide();
-                deviceHolder = holder;
-                onReady();
-            }, readyLabel);
-        }
-
         // Always PvP — CanOpponentDecideDefense (which gates this button)
         // already requires it, so there's no NPC branch to consider here.
         private void OnOpponentAttemptEscapeClicked()
         {
             match.ActiveEngagement.BeginOpponentEscapeAttempt(rng);
-            HandOffDeviceTo(RoundAttacker.Player, "Try to Stop Them!", ContinueEscapeIntercept);
+            RefreshEngagementScreen();
         }
 
         private void OnOpponentBraceClicked() => DeclareOrResolveDefense(wantsBrace: true);
 
         private void OnOpponentHoldClicked() => DeclareOrResolveDefense(wantsBrace: false);
-
-        // Shared by every handler that resolves a round's action
-        // (Escape, Attack, Opponent-Escape). If the fight just ended,
-        // just refresh — dismissing results with Continue isn't a
-        // privileged action, so whoever currently holds the device can
-        // tap it with no hand-off. Otherwise, the next round's pre-round
-        // Escape/Roll-Initiative choice is always the initiating
-        // player's call, so hand back to them if the opponent still has it.
-        private void AdvanceAfterRoundAction()
-        {
-            if (match.ActiveEngagement.Outcome != EngagementOutcome.InProgress)
-            {
-                RefreshEngagementScreen();
-                return;
-            }
-
-            HandOffDeviceTo(RoundAttacker.Player, "Your Move", RefreshEngagementScreen);
-        }
 
         // The one engagement handler that still calls RefreshView() —
         // ending the engagement genuinely needs to resync the map/chrome,
@@ -727,6 +714,24 @@ namespace StarBound.Demo
                 _ => null
             };
 
+            // ResolveActiveEngagement sets a PendingTurnStartNotice on
+            // whichever side either got destroyed OR (PvP only) just
+            // won the other's money — normally left for
+            // OnHandoffConfirmed to show at the START of THEIR next
+            // turn, since either case can land on OtherPlayer, who isn't
+            // looking at the device right now. But when it's
+            // CurrentPlayer's own notice, they're already the one
+            // holding the device this instant — showing it immediately
+            // reads far better than leaving them to wonder why their
+            // ship just teleported (or their money just changed),
+            // possibly several more actions later, by the time their
+            // OWN next-turn handoff finally rolls around. OtherPlayer's
+            // own notice (if any, PvP only) is untouched — still
+            // correctly deferred to their own future handoff.
+            var pendingNotice = match.CurrentPlayer.ConsumePendingTurnStartNotice();
+            if (!string.IsNullOrEmpty(pendingNotice))
+                popupDialog.ShowAlert("Engagement Result", pendingNotice);
+
             RefreshView();
         }
 
@@ -734,35 +739,48 @@ namespace StarBound.Demo
         {
             var session = match.ActiveEngagement;
 
-            // PvP gets each side tinted to that player's own established
-            // color (same identity language chrome/WinScreen already
-            // use) instead of the flat neutral accent every NPC fight
-            // uses — a cheap way to make a PvP bout read as a genuine
-            // "versus" rather than the same panel with a different name.
-            var opponentColor = session.IsPvP
-                ? (match.OtherPlayer == match.PlayerOne ? PlayerOneColor : PlayerTwoColor)
-                : ScreenChromeKit.AccentColor;
-            var playerColor = session.IsPvP
-                ? (match.CurrentPlayer == match.PlayerOne ? PlayerOneColor : PlayerTwoColor)
-                : ScreenChromeKit.AccentColor;
+            var (playerColor, opponentColor) = GetEngagementAccentColors(session);
 
             // The panel's big, hard-to-miss visual signals (rim glow, top
             // accent bar, header) previously always used playerColor,
             // regardless of who was actually being asked to act — the
             // instruction text alone changed color, which wasn't obvious
-            // enough. This instead follows deviceHolder, so the whole
-            // panel's identity color visibly flips to whoever currently
-            // has the phone, not just a line of text.
-            var activeAccentColor = session.IsPvP
-                ? (deviceHolder == RoundAttacker.Player ? playerColor : opponentColor)
+            // enough. This instead follows EngagementSession.ActiveDecisionMaker
+            // (see that property's own comment — single source of truth
+            // for "whose moment is this," shared with EngagementScreen.
+            // RebuildActionRow), so the whole panel's identity color
+            // visibly tracks whoever's controls are currently shown, not
+            // just a line of text. Explicitly neutral once the fight is
+            // over rather than defaulting to playerColor — ActiveDecisionMaker
+            // returns null there, and sticking with whoever last acted
+            // could tint the terminal "Continue" screen in the LOSING
+            // side's color purely because they happened to take the last
+            // action.
+            var activeAccentColor = session.IsPvP && session.Outcome == EngagementOutcome.InProgress
+                ? (session.ActiveDecisionMaker == RoundAttacker.Player ? playerColor : opponentColor)
                 : ScreenChromeKit.AccentColor;
 
-            // These are the player's own items — while the opponent holds
-            // the device for their own decision, showing "Use X" buttons
-            // for someone else's items doesn't make sense.
-            var usableConsumables = deviceHolder == RoundAttacker.Player
+            // These are the player's own items — while it's the
+            // opponent's own decision, showing "Use X" buttons for
+            // someone else's items doesn't make sense. Lower-stakes than
+            // activeAccentColor above, so the simpler ?? Player fallback
+            // (today's exact default for NPC/finished fights) is fine
+            // here — nothing meaningful to use mid-terminal-state anyway.
+            var usableConsumables = (session.ActiveDecisionMaker ?? RoundAttacker.Player) == RoundAttacker.Player
                 ? match.CurrentPlayer.Ship.HeldItems.Where(item => item.Kind == ItemKind.Consumable && match.CanUseItem(item)).ToList()
                 : new List<ItemDefinition>();
+
+            // Same hull-style assignment CreateShipMarkers uses for the
+            // map markers (0=Interceptor/PlayerOne, 1=Cruiser/PlayerTwo) —
+            // the battle-scene portrait should show the SAME ship a
+            // player sees representing them on the map. Opponent sprite
+            // is only meaningful for PvP (a real player's own hull);
+            // EngagementScreen falls back to its own NPC placeholder when
+            // this is null.
+            var playerShipSprite = ShipMarkerView.GetHullSprite(match.CurrentPlayer == match.PlayerOne ? 0 : 1);
+            var opponentShipSprite = session.IsPvP
+                ? ShipMarkerView.GetHullSprite(match.OtherPlayer == match.PlayerOne ? 0 : 1)
+                : null;
 
             engagementScreen.Refresh(
                 session,
@@ -771,11 +789,14 @@ namespace StarBound.Demo
                 playerColor,
                 activeAccentColor,
                 lastEventDetail,
+                lastRollDetail,
                 usableConsumables,
                 lastRoundBanner.Text,
                 lastRoundBanner.Color,
                 lastRoundBanner.Kind,
                 lastRoundBanner.DefenderIsPlayer,
+                playerShipSprite,
+                opponentShipSprite,
                 OnAttemptEscapeClicked,
                 OnRollInitiativeClicked,
                 OnBraceClicked,
@@ -785,7 +806,9 @@ namespace StarBound.Demo
                 OnUseItemDuringEngagement,
                 OnOpponentAttemptEscapeClicked,
                 OnOpponentBraceClicked,
-                OnOpponentHoldClicked);
+                OnOpponentHoldClicked,
+                OnExecuteAttackClicked,
+                ContinueEscapeIntercept);
         }
 
         private void OnShopToggleClicked()
@@ -1073,9 +1096,10 @@ namespace StarBound.Demo
             _ => reason.ToString()
         };
 
-        // Parallel, Player-typed version of HandOffDeviceTo — see
-        // tradeDeviceHolder's own comment for why this isn't a literal
-        // reuse of that method.
+        // The engagement screen's own equivalent of this was removed
+        // once PvP combat became a shared screen (see the "[Multiplayer]
+        // PvP pass-and-play" story) — trade negotiation still needs this
+        // mid-interaction hand-off (see tradeDeviceHolder's own comment).
         private void HandOffTradeDeviceTo(Player holder, string readyLabel, Action onReady)
         {
             if (tradeDeviceHolder == holder)
@@ -1146,6 +1170,22 @@ namespace StarBound.Demo
         private static string Describe(AcceptJobFailureReason reason) => reason switch
         {
             AcceptJobFailureReason.AlreadyHasActiveJob => "you already have an active job",
+            _ => reason.ToString()
+        };
+
+        // ComputeLegalTargets filters candidate hexes purely by terrain
+        // match, with no money check — so a Tradelane hex the player
+        // can't actually afford the toll for is routinely offered as a
+        // "legal" target, not just in some rare edge case. Without this,
+        // tapping it just silently failed the move with a raw enum name
+        // ("Can't move there (InsufficientFundsForToll).").
+        private static string Describe(MoveFailureReason reason) => reason switch
+        {
+            MoveFailureReason.InsufficientFundsForToll => $"not enough money for the tradelane toll ({TollPricing.TradelaneTollPerHex})",
+            MoveFailureReason.WormholeDeviceRequired => "you need a Wormhole Device",
+            MoveFailureReason.TargetNotAdjacent => "that hex isn't adjacent",
+            MoveFailureReason.TargetTerrainMismatch => "that die doesn't match the terrain there",
+            MoveFailureReason.DieAlreadySpent => "that die's already been used",
             _ => reason.ToString()
         };
 
@@ -1363,32 +1403,28 @@ namespace StarBound.Demo
             // dice tray already uses — refreshed once on the frame the
             // engagement actually starts (nothing else currently signals
             // that moment directly), and otherwise only from the click
-            // handlers below as the fight progresses. Hidden during any
-            // mid-fight hand-off too — handoffScreen (a higher
-            // sortingOrder) already covers it, but this also stops it
-            // refreshing/rebuilding buttons underneath that hand-off.
-            var engagementVisible = !awaitingHandoff && !match.IsComplete && match.IsInEngagement && !awaitingEngagementHandoff && !showPause;
+            // handlers below as the fight progresses. PvP fights stay
+            // visible for their whole duration now, no mid-fight hiding
+            // (see the "[Multiplayer] PvP pass-and-play" story) — only
+            // the regular per-turn hand-off, match completion, and the
+            // pause menu still hide it.
+            var engagementVisible = !awaitingHandoff && !match.IsComplete && match.IsInEngagement && !showPause;
             engagementScreen.SetVisible(engagementVisible);
 
-            // A new engagement always starts with whoever's own match turn
-            // it is holding the device (they're the one who just moved
-            // onto a hex or tapped Attack) — deviceHolder tracks this so
-            // HandOffDeviceTo knows when a hand-off screen is actually
-            // needed versus when the right person already has it (see
-            // HandOffDeviceTo/AdvanceAfter*). Keyed off the session
-            // INSTANCE, not the visibility edge below — a mid-fight
-            // hand-off also flips engagementVisible false-then-true, and
-            // resetting on that edge instead would stomp the deviceHolder/
-            // lastRoundBanner state the hand-off's own callback just set.
+            // Keyed off the session INSTANCE, not the visibility edge
+            // above — showPause toggling mid-fight also flips
+            // engagementVisible false-then-true, and resetting on that
+            // edge instead would wipe lastRoundBanner state that belongs
+            // to the fight still in progress.
             var activeSession = match.IsInEngagement ? match.ActiveEngagement : null;
             if (activeSession != trackedEngagementSession)
             {
                 trackedEngagementSession = activeSession;
                 if (activeSession != null)
                 {
-                    deviceHolder = RoundAttacker.Player;
                     lastRoundBanner = (string.Empty, Color.white, RoundBannerKind.Info, false);
                     lastEventDetail = null;
+                    lastRollDetail = default;
                 }
             }
 
@@ -1612,6 +1648,25 @@ namespace StarBound.Demo
             return (playerName, $"{playerName}'s", opponentName, $"{opponentName}'s");
         }
 
+        // Single source of truth for "whose color is this" during an
+        // engagement, used both by RefreshEngagementScreen's own panel
+        // chrome and by the Describe*Banner methods below — a round
+        // banner like "Player Two wins initiative!" used to always get a
+        // fixed category color (blue for Initiative, gray for a Miss,
+        // etc.) regardless of which player it was actually about; this
+        // is what lets those banners use the correct player's own color
+        // instead. PvP ties each side to that player's own established
+        // identity color (PlayerOneColor/PlayerTwoColor, by IDENTITY,
+        // not current/other — those flip every turn, but each real
+        // player keeps the same color all match); PvE has no second
+        // real player to distinguish, so both sides share the neutral
+        // default.
+        private (Color Player, Color Opponent) GetEngagementAccentColors(EngagementSession session) =>
+            session.IsPvP
+                ? (match.CurrentPlayer == match.PlayerOne ? PlayerOneColor : PlayerTwoColor,
+                   match.OtherPlayer == match.PlayerOne ? PlayerOneColor : PlayerTwoColor)
+                : (ScreenChromeKit.AccentColor, ScreenChromeKit.AccentColor);
+
         // "you" is second person (needs the bare verb — "you win"), but
         // every other label this session ever produces ("opponent", or a
         // real PvP DisplayName) is third-person singular and needs the
@@ -1623,97 +1678,131 @@ namespace StarBound.Demo
         private static string Conjugate(string label, string baseForm, string thirdPersonForm) =>
             label == "you" ? baseForm : thirdPersonForm;
 
-        // selfLabel/otherLabel are whichever side is actually attempting
-        // the escape — OnAttemptEscapeClicked's NPC path and
-        // ContinueEscapeIntercept both figure out which side that is
-        // (PlayerLabel or OpponentLabel) before calling this, since
-        // EscapeAttemptResult.Roll/Total are always the escapee's own
-        // roll regardless of which side that is.
-        private static string DescribeEscape(EscapeAttemptResult result, string selfLabel, string otherLabel) =>
-            result.Success
-                ? $"Escape: {selfLabel} rolled {result.Roll} = {result.Total}, {otherLabel} rolled {result.OpponentRoll} = {result.OpponentTotal} — escaped!"
-                : $"Escape: {selfLabel} rolled {result.Roll} = {result.Total}, {otherLabel} rolled {result.OpponentRoll} = {result.OpponentTotal} — failed, lost 1 Energy.";
+        // Compact roll-math row for EngagementScreen's icon row (see
+        // RollDetailInfo) — replaced the old full-
+        // sentence versions of these three methods as part of the "[UI]
+        // Show Weapons/Shields/Speed context..." story. Names are
+        // deliberately dropped (the round banner these sit below already
+        // says who/what happened — this row is now purely "the math")
+        // and the stat modifier is derived arithmetically
+        // (modifier = total - roll) straight from the result structs
+        // rather than needing a separate Ship.GetStat lookup, since
+        // AttackTotal/DefenseTotal/etc. already equal roll + modifier by
+        // construction (see CombatResolver.cs).
 
-        private static string DescribeInitiative(InitiativeResult result, string playerLabel, string opponentLabel)
+        // escapeeIsPlayer: whichever side is actually attempting the
+        // escape — OnAttemptEscapeClicked's NPC path and
+        // ContinueEscapeIntercept both already know which side that is,
+        // since EscapeAttemptResult.Roll/Total are always the escapee's
+        // own roll regardless of which side that is.
+        private static RollDetailInfo DescribeEscape(EscapeAttemptResult result, bool escapeeIsPlayer)
         {
-            // WasPlayerCriticalFailure is always about the PLAYER's own
-            // roll (see CombatResolver.ResolveInitiative) — it was
-            // previously tacked onto the opponent's roll clause below,
-            // reading as if the opponent had fumbled when it was really
-            // the player's natural 1.
-            var fumble = result.WasPlayerCriticalFailure ? " (natural 1 — critical failure!)" : "";
-            return $"Speed: {playerLabel} rolled {result.PlayerSpeedRoll} = {result.PlayerSpeedTotal}{fumble}, " +
-                $"{opponentLabel} rolled {result.OpponentSpeedRoll} = {result.OpponentSpeedTotal} — " +
-                (result.Attacker == RoundAttacker.Player
-                    ? $"{playerLabel} {Conjugate(playerLabel, "attack", "attacks")}."
-                    : $"{opponentLabel} {Conjugate(opponentLabel, "attack", "attacks")}.");
+            var escapeeStat = result.Total - result.Roll;
+            var otherStat = result.OpponentTotal - result.OpponentRoll;
+            var escapeeFormula = $"{result.Roll}+{escapeeStat}={result.Total}";
+            var otherFormula = $"{result.OpponentRoll}+{otherStat}={result.OpponentTotal}";
+
+            return escapeeIsPlayer
+                ? new RollDetailInfo(
+                    IconGlyphMaterials.Glyph.Speed, escapeeFormula, result.Roll, escapeeStat, result.Total,
+                    IconGlyphMaterials.Glyph.Speed, otherFormula, result.OpponentRoll, otherStat, result.OpponentTotal)
+                : new RollDetailInfo(
+                    IconGlyphMaterials.Glyph.Speed, otherFormula, result.OpponentRoll, otherStat, result.OpponentTotal,
+                    IconGlyphMaterials.Glyph.Speed, escapeeFormula, result.Roll, escapeeStat, result.Total);
         }
 
-        private static string DescribeAttack(RoundResult result, string playerLabel, string playerPossessive, string opponentLabel, string opponentPossessive)
+        private static RollDetailInfo DescribeInitiative(InitiativeResult result)
         {
-            if (result.Attacker == RoundAttacker.Player)
-            {
-                var crit = result.WasCriticalHit ? " CRITICAL HIT!" : "";
-                // DefenderBraced used to be impossible on this branch (the
-                // opponent could never brace) so it was never mentioned —
-                // now that PvP opponents can brace when defending against
-                // the player's own attack, the log needs to say so, same
-                // as the other branch below already does.
-                var braceNote = result.DefenderBraced ? " (braced)" : "";
-                return $"Weapons: {playerLabel} rolled {result.AttackRoll} = {result.AttackTotal}, {opponentPossessive} Shields rolled {result.DefenseRoll} = {result.DefenseTotal}{braceNote} — " +
-                    (result.HitLanded ? $"{opponentLabel} lost {result.Damage} Hull.{crit}" : "missed.");
-            }
+            var playerStat = result.PlayerSpeedTotal - result.PlayerSpeedRoll;
+            var opponentStat = result.OpponentSpeedTotal - result.OpponentSpeedRoll;
+            // WasPlayerCriticalFailure is always about the PLAYER's own
+            // roll (see CombatResolver.ResolveInitiative).
+            var playerFormula = $"{result.PlayerSpeedRoll}+{playerStat}={result.PlayerSpeedTotal}" + (result.WasPlayerCriticalFailure ? " ↯" : "");
+            var opponentFormula = $"{result.OpponentSpeedRoll}+{opponentStat}={result.OpponentSpeedTotal}";
+            return new RollDetailInfo(
+                IconGlyphMaterials.Glyph.Speed, playerFormula, result.PlayerSpeedRoll, playerStat, result.PlayerSpeedTotal,
+                IconGlyphMaterials.Glyph.Speed, opponentFormula, result.OpponentSpeedRoll, opponentStat, result.OpponentSpeedTotal);
+        }
 
-            var opponentCrit = result.WasCriticalHit ? " CRITICAL HIT!" : "";
-            var opponentBraceNote = result.DefenderBraced ? " (braced)" : "";
-            return $"Weapons: {opponentLabel} rolled {result.AttackRoll} = {result.AttackTotal}, {playerPossessive} Shields rolled {result.DefenseRoll} = {result.DefenseTotal}{opponentBraceNote} — " +
-                (result.HitLanded ? $"{playerLabel} lost {result.Damage} Hull.{opponentCrit}" : "missed.");
+        private static RollDetailInfo DescribeAttack(RoundResult result)
+        {
+            var attackerStat = result.AttackTotal - result.AttackRoll;
+            var defenderStat = result.DefenseTotal - result.DefenseRoll;
+            var attackerFormula = $"{result.AttackRoll}+{attackerStat}={result.AttackTotal}" + (result.WasCriticalHit ? " ★" : "");
+            var defenderFormula = $"{result.DefenseRoll}+{defenderStat}={result.DefenseTotal}" + (result.DefenderBraced ? " (brace)" : "");
+
+            return result.Attacker == RoundAttacker.Player
+                ? new RollDetailInfo(
+                    IconGlyphMaterials.Glyph.Weapons, attackerFormula, result.AttackRoll, attackerStat, result.AttackTotal,
+                    IconGlyphMaterials.Glyph.Shields, defenderFormula, result.DefenseRoll, defenderStat, result.DefenseTotal)
+                : new RollDetailInfo(
+                    IconGlyphMaterials.Glyph.Shields, defenderFormula, result.DefenseRoll, defenderStat, result.DefenseTotal,
+                    IconGlyphMaterials.Glyph.Weapons, attackerFormula, result.AttackRoll, attackerStat, result.AttackTotal);
         }
 
         // Short, punchy versions of the log lines above, for the
         // prominent EngagementScreen banner — the roll-by-roll numbers
-        // behind it show separately, on their own line (see
+        // behind it show separately, on their own compact icon row (see
         // DescribeInitiative/DescribeAttack/DescribeEscape and
-        // EngagementScreen's own rollDetailText), but shouldn't be the
+        // EngagementScreen's own RollDetailInfo), but shouldn't be the
         // only place a round's actual outcome is visible.
-        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeRoundBanner(RoundResult result, string playerLabel, string opponentLabel)
+        // Colored to whichever player the sentence is actually ABOUT (the
+        // one missing, the one taking damage) rather than a fixed
+        // category color (gray for a miss, gold for a crit, etc.) — a
+        // banner naming a specific side should read in that side's own
+        // color, the same way the roll-reveal modal and initiative ring
+        // already do.
+        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeRoundBanner(RoundResult result, string playerLabel, string opponentLabel, Color playerColor, Color opponentColor)
         {
             var attackerLabel = result.Attacker == RoundAttacker.Player ? playerLabel : opponentLabel;
+            var attackerColor = result.Attacker == RoundAttacker.Player ? playerColor : opponentColor;
             var defenderLabel = result.Attacker == RoundAttacker.Player ? opponentLabel : playerLabel;
+            var defenderColor = result.Attacker == RoundAttacker.Player ? opponentColor : playerColor;
             var takes = Conjugate(defenderLabel, "take", "takes");
             var defenderIsPlayer = result.Attacker != RoundAttacker.Player;
 
             if (!result.HitLanded)
-                return ($"{attackerLabel} missed!", BannerMissColor, RoundBannerKind.Miss, defenderIsPlayer);
+                return ($"{attackerLabel} missed!", attackerColor, RoundBannerKind.Miss, defenderIsPlayer);
             if (result.WasCriticalHit)
-                return ($"CRITICAL HIT! {defenderLabel} {takes} {result.Damage} damage!", BannerCritColor, RoundBannerKind.CriticalHit, defenderIsPlayer);
-            return ($"{defenderLabel} {takes} {result.Damage} damage.", BannerHitColor, RoundBannerKind.Hit, defenderIsPlayer);
+                return ($"CRITICAL HIT! {defenderLabel} {takes} {result.Damage} damage!", defenderColor, RoundBannerKind.CriticalHit, defenderIsPlayer);
+            return ($"{defenderLabel} {takes} {result.Damage} damage.", defenderColor, RoundBannerKind.Hit, defenderIsPlayer);
         }
 
-        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeInitiativeBanner(InitiativeResult result, string playerLabel, string opponentLabel) =>
+        // The tuple's 4th slot is "DefenderIsPlayer" for attack banners,
+        // but EngagementScreen.PlayRoundOutcomeFeedback reads it as
+        // whichever side is this banner's featured actor in general —
+        // the winner here, the escapee below. Same tuple shape, kind-
+        // dependent meaning, documented on the enum itself.
+        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeInitiativeBanner(InitiativeResult result, string playerLabel, string opponentLabel, Color playerColor, Color opponentColor) =>
             result.Attacker == RoundAttacker.Player
-                ? ($"{playerLabel} {Conjugate(playerLabel, "win", "wins")} initiative!", BannerInitiativeColor, RoundBannerKind.Info, false)
-                : ($"{opponentLabel} {Conjugate(opponentLabel, "win", "wins")} initiative!", BannerInitiativeColor, RoundBannerKind.Info, false);
+                ? ($"{playerLabel} {Conjugate(playerLabel, "win", "wins")} initiative!", playerColor, RoundBannerKind.Initiative, true)
+                : ($"{opponentLabel} {Conjugate(opponentLabel, "win", "wins")} initiative!", opponentColor, RoundBannerKind.Initiative, false);
 
-        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeEscapeBanner(EscapeAttemptResult result, string selfLabel) =>
+        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeEscapeBanner(EscapeAttemptResult result, string selfLabel, bool escapeeIsPlayer, Color selfColor) =>
             result.Success
-                ? ($"{selfLabel} escaped!", BannerEscapeColor, RoundBannerKind.Info, false)
-                : ($"{selfLabel}'s escape failed!", BannerMissColor, RoundBannerKind.Info, false);
+                ? ($"{selfLabel} escaped!", selfColor, RoundBannerKind.EscapeSuccess, escapeeIsPlayer)
+                : ($"{selfLabel}'s escape failed!", selfColor, RoundBannerKind.EscapeFailed, escapeeIsPlayer);
 
         private void CreateShipMarkers()
         {
+            // Hull style 0/1 (Interceptor/Cruiser) are the only ones
+            // assigned today — exactly 2 players. Styles 2/3 (Vanguard/
+            // Scout) exist in Assets/Resources/Ships ready for whenever
+            // "[Multiplayer] Support more than two players" lands.
             playerOneMarker = new GameObject("Player One Ship", typeof(ShipMarkerView));
             playerOneMarker.transform.SetParent(markersParent, false);
-            playerOneMarker.GetComponent<ShipMarkerView>().Initialize(hexRadius * 0.3f, PlayerOneColor, hullStyle: 0);
+            p1MarkerViewComponent = playerOneMarker.GetComponent<ShipMarkerView>();
+            p1MarkerViewComponent.Initialize(hexRadius * 0.3f, PlayerOneColor, hullStyle: 0);
 
             playerTwoMarker = new GameObject("Player Two Ship", typeof(ShipMarkerView));
             playerTwoMarker.transform.SetParent(markersParent, false);
-            playerTwoMarker.GetComponent<ShipMarkerView>().Initialize(hexRadius * 0.3f, PlayerTwoColor, hullStyle: 1);
+            p2MarkerViewComponent = playerTwoMarker.GetComponent<ShipMarkerView>();
+            p2MarkerViewComponent.Initialize(hexRadius * 0.3f, PlayerTwoColor, hullStyle: 1);
 
-            // Snap straight to the starting positions — UpdateShipMarkers
+            // Snap straight to the starting positions/heading — UpdateShipMarkers
             // (called from every RefreshView) always eases from wherever
-            // the marker currently sits, which would otherwise slide both
-            // markers in from the map origin on the very first frame.
+            // the marker currently sits, which would otherwise slide/spin
+            // both markers in from the map origin on the very first frame.
             var (p1Target, p2Target) = ComputeMarkerTargets();
             playerOneMarker.transform.localPosition = p1Target;
             playerTwoMarker.transform.localPosition = p2Target;
@@ -1730,8 +1819,41 @@ namespace StarBound.Demo
         private void UpdateShipMarkers()
         {
             var (p1Target, p2Target) = ComputeMarkerTargets();
-            AnimateMarkerTo(playerOneMarker.transform, p1Target, ref p1MarkerRoutine);
-            AnimateMarkerTo(playerTwoMarker.transform, p2Target, ref p2MarkerRoutine);
+            UpdateMarkerOrMaterialize(playerOneMarker.transform, p1Target, p1MarkerViewComponent, match.PlayerOne, ref p1MarkerRoutine, ref p1MarkerRotationRoutine);
+            UpdateMarkerOrMaterialize(playerTwoMarker.transform, p2Target, p2MarkerViewComponent, match.PlayerTwo, ref p2MarkerRoutine, ref p2MarkerRotationRoutine);
+        }
+
+        // A destroyed ship's respawn relocation (see IntegrityPenaltyService.
+        // ApplyIfDepleted, which calls Player.MarkTeleported alongside
+        // setting Position) is a teleport, not a move — the normal
+        // glide+turn animation below would read as "the ship flew there
+        // and survived," which is exactly backwards per explicit user
+        // feedback. Skip straight to the new position/heading and play a
+        // materialize effect there instead (see ShipMarkerView.
+        // PlayMaterialize). Every other RefreshView-driven position
+        // change (ordinary movement, escape relocation) still gets the
+        // normal glide.
+        private void UpdateMarkerOrMaterialize(Transform markerTransform, Vector3 target, ShipMarkerView view, Player player, ref Coroutine moveRoutine, ref Coroutine rotationRoutine)
+        {
+            if (player.ConsumeTeleported())
+            {
+                if (moveRoutine != null)
+                    StopCoroutine(moveRoutine);
+                if (rotationRoutine != null)
+                    StopCoroutine(rotationRoutine);
+                moveRoutine = null;
+                rotationRoutine = null;
+
+                markerTransform.localPosition = target;
+                markerTransform.localRotation = Quaternion.identity; // default heading — no prior direction is meaningful for a fresh ship
+                view.SetThrusterIntensity(0f);
+                view.SetBankAmount(0f);
+                view.PlayMaterialize();
+                return;
+            }
+
+            UpdateMarkerHeading(markerTransform, target, view, ref rotationRoutine);
+            AnimateMarkerTo(markerTransform, target, view, ref moveRoutine);
         }
 
         // UpdateShipMarkers runs on every RefreshView — most calls (die
@@ -1740,35 +1862,95 @@ namespace StarBound.Demo
         // target genuinely moved, and retargets (rather than stacking) an
         // already-running one for a chained multi-die move within the
         // same action.
-        private void AnimateMarkerTo(Transform markerTransform, Vector3 target, ref Coroutine routine)
+        private void AnimateMarkerTo(Transform markerTransform, Vector3 target, ShipMarkerView view, ref Coroutine routine)
         {
             if (markerTransform.localPosition == target)
                 return;
 
             if (routine != null)
                 StopCoroutine(routine);
-            routine = StartCoroutine(AnimateMarkerRoutine(markerTransform, target));
+            routine = StartCoroutine(AnimateMarkerRoutine(markerTransform, target, view));
         }
 
-        private IEnumerator AnimateMarkerRoutine(Transform markerTransform, Vector3 target)
+        private IEnumerator AnimateMarkerRoutine(Transform markerTransform, Vector3 target, ShipMarkerView view)
         {
             var start = markerTransform.localPosition;
             var elapsed = 0f;
             while (elapsed < MarkerEaseDuration)
             {
                 elapsed += Time.deltaTime;
-                var t = EaseOutCubic(Mathf.Clamp01(elapsed / MarkerEaseDuration));
-                markerTransform.localPosition = Vector3.Lerp(start, target, t);
+                var t = Mathf.Clamp01(elapsed / MarkerEaseDuration);
+                markerTransform.localPosition = Vector3.Lerp(start, target, EaseOutCubic(t));
+
+                // Thruster brightens through the move and settles back to
+                // ShipMarkerView's own idle pulse as the ship arrives — a
+                // sine arc over raw (un-eased) t reads as "spooling up,
+                // cruising, spooling down" without any extra state to
+                // track.
+                view.SetThrusterIntensity(Mathf.Sin(t * Mathf.PI));
                 yield return null;
             }
 
             markerTransform.localPosition = target;
+            view.SetThrusterIntensity(0f);
+        }
+
+        // Starts (or retargets) a turn-to-face-heading glide whenever the
+        // upcoming position glide would actually change direction — a
+        // move that continues straight in the same direction leaves the
+        // heading untouched rather than re-animating a no-op rotation.
+        // Reads "current heading" back from the Transform's own Z
+        // rotation rather than a tracked field (see the field-block
+        // comment above) — both because the Transform already is the
+        // authoritative state, and because an IEnumerator coroutine can't
+        // take a `ref` parameter to write one back on completion anyway.
+        private void UpdateMarkerHeading(Transform markerTransform, Vector3 target, ShipMarkerView view, ref Coroutine routine)
+        {
+            Vector2 current = markerTransform.localPosition;
+            Vector2 to = target;
+            if (current == to)
+                return;
+
+            var toHeadingDeg = Mathf.Atan2(to.y - current.y, to.x - current.x) * Mathf.Rad2Deg;
+            var fromHeadingDeg = markerTransform.localEulerAngles.z + MarkerDefaultHeadingDegrees;
+
+            if (Mathf.Approximately(Mathf.DeltaAngle(fromHeadingDeg, toHeadingDeg), 0f))
+                return;
+
+            if (routine != null)
+                StopCoroutine(routine);
+            routine = StartCoroutine(AnimateMarkerRotationRoutine(markerTransform, view, fromHeadingDeg, toHeadingDeg));
+        }
+
+        private IEnumerator AnimateMarkerRotationRoutine(Transform markerTransform, ShipMarkerView view, float fromHeadingDeg, float toHeadingDeg)
+        {
+            var delta = Mathf.DeltaAngle(fromHeadingDeg, toHeadingDeg);
+            var elapsed = 0f;
+            while (elapsed < MarkerRotationDuration)
+            {
+                elapsed += Time.deltaTime;
+                var t = Mathf.Clamp01(elapsed / MarkerRotationDuration);
+                var headingDeg = fromHeadingDeg + delta * EaseOutCubic(t);
+                markerTransform.localRotation = Quaternion.Euler(0f, 0f, headingDeg - MarkerDefaultHeadingDegrees);
+
+                // Banks into the turn and back out of it — peaks at the
+                // midpoint of elapsed time (not the eased heading
+                // progress above), matching how a real bank peaks
+                // mid-maneuver rather than tracking the nose's own ease
+                // curve. See ShipMarkerView.SetBankAmount for why the
+                // turn direction itself doesn't matter any more.
+                view.SetBankAmount(Mathf.Sin(t * Mathf.PI) * MarkerMaxBankAmount);
+                yield return null;
+            }
+
+            markerTransform.localRotation = Quaternion.Euler(0f, 0f, toHeadingDeg - MarkerDefaultHeadingDegrees);
+            view.SetBankAmount(0f);
         }
 
         // Same ease-out-cubic shape as MapCameraController's own copy —
         // duplicated rather than shared since there's no existing shared
-        // "easing" utility in the project and these are the only two
-        // users so far.
+        // "easing" utility in the project and these are the only users
+        // so far.
         private static float EaseOutCubic(float t) => 1f - Mathf.Pow(1f - t, 3f);
 
         private void RefreshView()
