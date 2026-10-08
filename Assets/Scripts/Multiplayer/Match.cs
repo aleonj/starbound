@@ -35,9 +35,11 @@ namespace StarBound.Multiplayer
 
         // Successful (non-PvP) engagement wins accumulate toward the next
         // progression event, which introduces a new ActiveVariable + ActiveGoal
-        // and — once that goal is completed by either player — raises
-        // MaxUnlockedTier. See MatchProgressionService and HandleArrival/
-        // ResolveActiveEngagement for where each piece is actually wired in.
+        // and — once that goal is completed by either player, AND both
+        // players' Weapons/Shields/Speed clear the next tier's floor (see
+        // CompleteGoal/IsReadyForTier) — raises MaxUnlockedTier. See
+        // MatchProgressionService and HandleArrival/ResolveActiveEngagement
+        // for where each piece is actually wired in.
         private const int EngagementsPerProgressionEvent = 2;
 
         private DiceHand currentHand;
@@ -388,17 +390,47 @@ namespace StarBound.Multiplayer
             CompleteGoal(CurrentPlayer);
         }
 
-        // Pays the reward, advances the progression phase, and clears the
-        // goal — ActiveVariable deliberately stays as-is, since it persists
-        // until the *next* event replaces it, not until the goal is claimed.
+        // Pays the reward and clears the goal unconditionally, but the
+        // ceiling itself only rises if both players are actually ready for
+        // it — MaxUnlockedTier is shared match state (see its own doc
+        // comment), so one player's gear can't open Hard on the other
+        // player's behalf. If neither side qualifies yet, the goal is
+        // still claimed and ActiveVariable/ActiveGoal reset as normal, so
+        // HandleProgressionOnEngagementWin keeps firing fresh events (and
+        // paying out money) every EngagementsPerProgressionEvent wins
+        // regardless — the next completed goal re-checks readiness, so
+        // this delays the unlock rather than blocking progress outright.
         private void CompleteGoal(Player awardee)
         {
             awardee.Ship.AddMoney(ActiveGoal.RewardMoney);
-            MaxUnlockedTier = NextUnlockTier();
+
+            var nextTier = NextUnlockTier();
+            if (BothPlayersReadyFor(nextTier))
+                MaxUnlockedTier = nextTier;
+
             ActiveGoal = null;
         }
 
         private EngagementTier NextUnlockTier() => (EngagementTier)((int)MaxUnlockedTier + 1);
+
+        // "Ready" means not mathematically overmatched by the weakest
+        // possible roll at that tier — the MIN of each performance stat's
+        // range, not the midpoint (RandomMatchBot's own grind-target
+        // heuristic uses the midpoint because it's aiming to play
+        // competitively; this gate only needs to rule out guaranteed
+        // overmatch). Hull is deliberately excluded — it's a depleting
+        // health pool, not a gear investment, so it doesn't belong in a
+        // gear-readiness check the way Weapons/Shields/Speed do.
+        private static bool IsReadyForTier(Ship ship, EngagementTier tier)
+        {
+            var definition = EngagementDefinitionTable.For(tier);
+            return ship.GetStat(CoreStat.Weapons) >= definition.WeaponsRange.Min
+                && ship.GetStat(CoreStat.Shields) >= definition.ShieldsRange.Min
+                && ship.GetStat(CoreStat.Speed) >= definition.SpeedRange.Min;
+        }
+
+        private bool BothPlayersReadyFor(EngagementTier tier) =>
+            IsReadyForTier(PlayerOne.Ship, tier) && IsReadyForTier(PlayerTwo.Ship, tier);
 
         // Called only for a real (non-PvP) engagement win — see
         // ResolveActiveEngagement. Two independent things can happen on

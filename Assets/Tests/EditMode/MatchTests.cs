@@ -1479,6 +1479,133 @@ namespace StarBound.Tests
             Assert.GreaterOrEqual(p1.Ship.Money, goal.RewardMoney);
         }
 
+        // --- Tier-unlock readiness gate (Match.CompleteGoal / IsReadyForTier) ---
+
+        private static void SetAllPerformanceStats(Ship ship, int value)
+        {
+            foreach (var stat in new[] { CoreStat.Weapons, CoreStat.Shields, CoreStat.Speed })
+                ship.ApplyStatDelta(stat, value - ship.GetStat(stat));
+        }
+
+        // Completes whichever goal type MatchProgressionService happened
+        // to draw, teleporting p1 to an existing neighbor of the goal's
+        // target rather than assuming p1 is already adjacent (same
+        // technique as TravelAndPayGoal_CompletingIt_... above), so
+        // callers don't need to track exact positions through a second
+        // progression cycle. applyFinalStats runs immediately before the
+        // step that actually triggers CompleteGoal's readiness check
+        // (ResolveActiveEngagement for DefeatNamedTarget, or the Move call
+        // itself for TravelAndPay) — letting a test guarantee the fight's
+        // own win with one set of stats and then test the gate with a
+        // deliberately different one, since a DefeatNamedTarget win and a
+        // low readiness stat would otherwise conflict.
+        private static void CompleteActiveGoal(Match match, Player p1, Action applyFinalStats = null)
+        {
+            var goal = match.ActiveGoal;
+            match.Map.TryGetHex(goal.TargetHex, out var targetHex);
+            p1.Position = HexMath.Neighbors(goal.TargetHex).First(n => match.Map.TryGetHex(n, out _));
+
+            if (goal.Type == MatchGoalType.TravelAndPay)
+            {
+                p1.Ship.AddMoney(goal.MoneyRequired + 10);
+                applyFinalStats?.Invoke();
+                match.RollDice(new Random(1));
+                match.Move(new RolledDie(0, targetHex.Terrain), goal.TargetHex, new Random(1));
+            }
+            else
+            {
+                p1.Ship.AddMoney(10); // covers a possible Tradelane toll on the approach
+                p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+                p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+                p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guarantee the win itself
+                match.RollDice(new Random(1));
+                match.Move(new RolledDie(0, targetHex.Terrain), goal.TargetHex, new Random(1));
+                ForceWin(match);
+                applyFinalStats?.Invoke(); // set the stats actually under test, right before the gate reads them
+                match.ResolveActiveEngagement(new Random(1));
+            }
+        }
+
+        // Reaches Medium (its floor is 3 — always trivially met at
+        // baseline, see EngagementDefinitionTable) then fires a SECOND
+        // progression event there, leaving an ActiveGoal whose completion
+        // is the one that actually attempts to unlock Hard (floor 5) —
+        // exactly the transition IsReadyForTier exists to gate. Re-arms
+        // the two Easy markers at their original coordinates for the
+        // second win-counting cycle, since the originals were cleared by
+        // the first.
+        private static (Match match, Player p1, Player p2) BuildMatchWithPendingHardUnlockGoal(int seed)
+        {
+            var (match, p1, p2) = BuildProgressionMatch();
+            WinTwoEasyEngagementsAndFireAnEvent(match, p1, resolutionSeed: seed);
+            CompleteActiveGoal(match, p1);
+            Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier);
+
+            match.EndTurn();
+            match.EndTurn();
+            p1.Position = new HexCoordinate(0, 0);
+            match.Map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            match.Map.SetHex(new Hex(new HexCoordinate(1, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+
+            WinTwoEasyEngagementsAndFireAnEvent(match, p1, resolutionSeed: seed);
+            Assert.IsNotNull(match.ActiveGoal, "Firing the second event alone shouldn't advance the phase either.");
+            Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier);
+
+            return (match, p1, p2);
+        }
+
+        [Test]
+        public void CompleteGoal_NeitherPlayerMeetsNextTierFloor_DelaysUnlockButStillPaysReward()
+        {
+            var (match, p1, p2) = BuildMatchWithPendingHardUnlockGoal(seed: 1);
+            var hardFloor = EngagementDefinitionTable.For(EngagementTier.Hard).WeaponsRange.Min;
+            var reward = match.ActiveGoal.RewardMoney;
+            var moneyBefore = p1.Ship.Money;
+
+            CompleteActiveGoal(match, p1, applyFinalStats: () =>
+            {
+                SetAllPerformanceStats(p1.Ship, hardFloor - 1);
+                SetAllPerformanceStats(p2.Ship, hardFloor - 1);
+            });
+
+            Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier,
+                "Neither player meets the Hard floor yet — the shared ceiling shouldn't rise.");
+            Assert.IsNull(match.ActiveGoal,
+                "The goal itself is still claimed even though the tier didn't advance — this delays, not blocks, progress.");
+            Assert.GreaterOrEqual(p1.Ship.Money, moneyBefore + reward);
+        }
+
+        [Test]
+        public void CompleteGoal_OnlyAwardeeMeetsNextTierFloor_StillDoesNotAdvanceSharedTier()
+        {
+            var (match, p1, p2) = BuildMatchWithPendingHardUnlockGoal(seed: 1);
+            var hardFloor = EngagementDefinitionTable.For(EngagementTier.Hard).WeaponsRange.Min;
+
+            CompleteActiveGoal(match, p1, applyFinalStats: () =>
+            {
+                SetAllPerformanceStats(p1.Ship, hardFloor + 5); // the awardee is well-geared
+                SetAllPerformanceStats(p2.Ship, hardFloor - 1); // the other player isn't
+            });
+
+            Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier,
+                "MaxUnlockedTier is shared match state — one player's gear can't open Hard on the other's behalf.");
+        }
+
+        [Test]
+        public void CompleteGoal_BothPlayersMeetNextTierFloor_AdvancesSharedTier()
+        {
+            var (match, p1, p2) = BuildMatchWithPendingHardUnlockGoal(seed: 1);
+            var hardFloor = EngagementDefinitionTable.For(EngagementTier.Hard).WeaponsRange.Min;
+
+            CompleteActiveGoal(match, p1, applyFinalStats: () =>
+            {
+                SetAllPerformanceStats(p1.Ship, hardFloor);
+                SetAllPerformanceStats(p2.Ship, hardFloor);
+            });
+
+            Assert.AreEqual(EngagementTier.Hard, match.MaxUnlockedTier);
+        }
+
         // --- Persistent per-planet shop (PlanetShopService) ---
 
         private static (Match match, Player p1, Player p2) BuildPlanetShopMatch()
