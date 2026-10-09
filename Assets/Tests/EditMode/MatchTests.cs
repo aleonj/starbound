@@ -249,6 +249,145 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void ResolveActiveEngagement_PlayerEscapes_NeverRelocatesToTradelaneOrWormhole()
+        {
+            // User-requested: an escape shouldn't be able to land somewhere
+            // that exists for passing through, not for being a destination
+            // — same rule already applied to goal targets/job destinations/
+            // engagement markers. Every neighbor of the escape hex except
+            // one is Tradelane/Wormhole, so relocation would fail loudly
+            // (by landing on one) across enough seeds if the exclusion
+            // weren't actually wired in.
+            var map = new GameMap(radius: 2, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace)); // the one legal relocation target
+            map.SetHex(new Hex(new HexCoordinate(0, -1), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy }); // escape hex
+            map.SetHex(new Hex(new HexCoordinate(1, -1), TerrainType.Tradelane));
+            map.SetHex(new Hex(new HexCoordinate(1, -2), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(0, -2), TerrainType.Tradelane));
+            map.SetHex(new Hex(new HexCoordinate(-1, -1), TerrainType.Wormhole));
+            map.SetHex(new Hex(new HexCoordinate(-1, 0), TerrainType.Tradelane));
+
+            for (var seed = 1; seed <= 50; seed++)
+            {
+                var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+                var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(2, 0) };
+                var match = new Match(map, p1, p2);
+
+                match.RollDice(new Random(seed));
+                match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(seed));
+                p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape success
+                match.ActiveEngagement.AttemptEscape(new Random(seed));
+                Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome, $"Seed {seed}: +20 Speed should guarantee escape success.");
+
+                match.ResolveActiveEngagement(new Random(seed));
+
+                Assert.AreEqual(new HexCoordinate(0, 0), p1.Position,
+                    $"Seed {seed}: relocated to the one Tradelane/Wormhole-adjacent hex that should be impossible to land on.");
+            }
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_PlayerEscapes_NeverRelocatesToTheActiveGoalsTargetHex()
+        {
+            // User-requested: a fleeing ship shouldn't land on any hex
+            // that would show a beacon marker (see HexMarkerOverride) —
+            // including the race goal's own target, not just Tradelane/
+            // Wormhole. Reuses the existing BuildMatchWithGoalType helper
+            // rather than a hand-built map with an assumed single
+            // candidate — BuildTravelAndPayGoal has no HasEngagement
+            // exclusion, so a hand-built map can easily end up with MORE
+            // than one eligible candidate than expected (learned the hard
+            // way drafting this test). Instead, the escape/approach hexes
+            // are computed dynamically FROM wherever the goal actually
+            // landed, so this holds regardless of which hex that turns
+            // out to be.
+            var (match, p1, _) = BuildMatchWithGoalType(MatchGoalType.TravelAndPay);
+            var goal = match.ActiveGoal;
+
+            // Fresh coordinates the map doesn't already use, so there's no
+            // risk of colliding with (or accidentally relying on) any of
+            // BuildProgressionMatch's own existing hexes.
+            var escapeHex = HexMath.Neighbors(goal.TargetHex).First(n => !match.Map.TryGetHex(n, out _));
+            match.Map.SetHex(new Hex(escapeHex, TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            var approachHex = HexMath.Neighbors(escapeHex).First(n => n != goal.TargetHex && !match.Map.TryGetHex(n, out _));
+            match.Map.SetHex(new Hex(approachHex, TerrainType.ClearSpace));
+
+            for (var seed = 1; seed <= 30; seed++)
+            {
+                // Triggering an engagement every turn means EndTurn's own
+                // banking never applies (see the [Combat] Energy
+                // overhaul's engagementOccurredThisTurn rule) — Energy
+                // would otherwise only ever decrease (1 per escape
+                // attempt) and hit 0 partway through this loop, which
+                // blocks RollDice outright. Topped off explicitly instead
+                // of relying on banking, since this loop is deliberately
+                // stress-testing relocation across many seeds, not Energy
+                // pacing.
+                p1.Ship.ApplyStatDelta(CoreStat.Energy, Ship.MaxEnergyValue - p1.Ship.GetStat(CoreStat.Energy));
+                p1.Position = approachHex;
+                match.RollDice(new Random(seed));
+                match.Move(new RolledDie(0, TerrainType.ClearSpace), escapeHex, new Random(seed));
+                p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape success
+                match.ActiveEngagement.AttemptEscape(new Random(seed));
+                Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome, $"Seed {seed}: +20 Speed should guarantee escape success.");
+
+                match.ResolveActiveEngagement(new Random(seed));
+
+                Assert.AreNotEqual(goal.TargetHex, p1.Position, $"Seed {seed}: relocated onto the active goal's own target hex.");
+
+                // Reusing the same match across iterations (rather than
+                // rebuilding via the expensive seed-searching helper 30
+                // times) — needs its action budget reset between rounds,
+                // same two-EndTurn pattern WinTwoEasyEngagementsAndFireAnEvent
+                // already uses to get back to p1 with a fresh turn.
+                match.EndTurn();
+                match.EndTurn();
+            }
+        }
+
+        [Test]
+        public void ResolveActiveEngagement_PlayerEscapes_NeverRelocatesToThePlayersOwnJobDestination()
+        {
+            // Same "no beacon hexes" rule, for a job destination this
+            // time. (1, 0) is the escape-trigger hex; (2, 0) is a
+            // Transport job's Destination the player has already
+            // accepted — relocation must never land there either, even
+            // though it isn't match-global state the way a goal is (it's
+            // specific to the player being relocated, not whoever's turn
+            // it happens to be — see IsEligibleEscapeDestination's own
+            // comment on checking THIS player's ActiveJob).
+            var map = new GameMap(radius: 3, Difficulty.Medium);
+            map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.ClearSpace));
+            map.SetHex(new Hex(new HexCoordinate(1, 0), TerrainType.ClearSpace) { Engagement = EngagementTier.Easy });
+            map.SetHex(new Hex(new HexCoordinate(2, 0), TerrainType.PlanetOrStarport)); // job destination
+            map.SetHex(new Hex(new HexCoordinate(1, -1), TerrainType.ClearSpace)); // the one legal relocation target
+
+            for (var seed = 1; seed <= 30; seed++)
+            {
+                var p1 = new Player("p1", "One", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+                var p2 = new Player("p2", "Two", new Ship(cargoCapacity: 3)) { Position = new HexCoordinate(0, 0) };
+                var match = new Match(map, p1, p2);
+                p1.AcceptJob(new JobDefinition(JobType.Transport, new HexCoordinate(2, 0), reward: 50));
+
+                match.RollDice(new Random(seed));
+                match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(1, 0), new Random(seed));
+                p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape success
+                match.ActiveEngagement.AttemptEscape(new Random(seed));
+                Assert.AreEqual(EngagementOutcome.PlayerEscaped, match.ActiveEngagement.Outcome, $"Seed {seed}: +20 Speed should guarantee escape success.");
+
+                match.ResolveActiveEngagement(new Random(seed));
+
+                // (0, 0) [the players' original shared start, still a
+                // perfectly legal hex after they've moved away] is also a
+                // valid candidate alongside (1, -1) — this only asserts
+                // the job destination specifically was never chosen, not
+                // which of the two legal candidates was.
+                Assert.AreNotEqual(new HexCoordinate(2, 0), p1.Position,
+                    $"Seed {seed}: relocated onto the player's own active job destination.");
+            }
+        }
+
+        [Test]
         public void ResolveActiveEngagement_PlayerEscapes_LeavesMarkerOnTheMap()
         {
             var (match, p1, _) = BuildMatch();

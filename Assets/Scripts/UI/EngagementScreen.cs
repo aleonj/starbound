@@ -598,17 +598,21 @@ namespace StarBound.UI
         private Action cachedOnExecuteAttack;
         private Action cachedOnContinueEscapeIntercept;
 
-        // Stat bars normalize against the value observed the first time a
-        // given session is shown, not a fixed max — ships have no fixed
-        // max stat in this game (repairs/items can raise them
-        // indefinitely), so "starting value this fight" is the standard
-        // stand-in for max-less stats. Reset whenever a new session
-        // reference appears.
+        // Hull/Weapons/Shields/Speed stat bars normalize against the value
+        // observed the first time a given session is shown, not a fixed
+        // max — those stats have no fixed ceiling in this game (repairs/
+        // items can raise them indefinitely), so "starting value this
+        // fight" is the standard stand-in. Energy is the one exception —
+        // it DOES have a real, fixed ceiling (Ship.MaxEnergyValue, see the
+        // [Combat] Energy overhaul) — so its bar uses that directly
+        // instead (see SetStatBar's Energy call sites below), rather than
+        // a per-fight "starting value" that would read as misleadingly
+        // full whenever a fight starts with Energy already below max
+        // (user-reported: a 3/5 Energy bar rendering as a solid full bar).
+        // Reset whenever a new session reference appears.
         private EngagementSession trackedSession;
         private int playerStartingHull;
-        private int playerStartingEnergy;
         private int opponentStartingHull;
-        private int opponentStartingEnergy;
 
         // What the Hull bars actually SHOW right now — deliberately not
         // always session's own live value. A Hit/CriticalHit round's
@@ -671,12 +675,7 @@ namespace StarBound.UI
             {
                 trackedSession = session;
                 playerStartingHull = session.PlayerShip.GetStat(CoreStat.Hull);
-                playerStartingEnergy = session.PlayerShip.GetStat(CoreStat.Energy);
                 opponentStartingHull = new OpponentStatView(session.Opponent).Hull;
-                // Opponent.GetStat is only meaningful for PvP (a real
-                // player's ship) — for an NPC it's still a valid read
-                // (NpcShipGenerator sets it), just never displayed below.
-                opponentStartingEnergy = session.Opponent.GetStat(CoreStat.Energy);
                 displayedPlayerHull = playerStartingHull;
                 displayedOpponentHull = opponentStartingHull;
                 hullRevealPending = false;
@@ -830,7 +829,7 @@ namespace StarBound.UI
             if (session.IsPvP)
             {
                 var opponentEnergy = session.Opponent.GetStat(CoreStat.Energy);
-                SetStatBar(opponentEnergyFill, opponentEnergy, opponentStartingEnergy);
+                SetStatBar(opponentEnergyFill, opponentEnergy, Ship.MaxEnergyValue);
                 opponentEnergyValueText.text = opponentEnergy.ToString();
             }
 
@@ -859,7 +858,7 @@ namespace StarBound.UI
             playerHullValueText.text = displayedPlayerHull.ToString();
 
             var playerEnergy = ship.GetStat(CoreStat.Energy);
-            SetStatBar(playerEnergyFill, playerEnergy, playerStartingEnergy);
+            SetStatBar(playerEnergyFill, playerEnergy, Ship.MaxEnergyValue);
             playerEnergyValueText.text = playerEnergy.ToString();
 
             playerWeaponsValueText.text = ship.GetStat(CoreStat.Weapons).ToString();

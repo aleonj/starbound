@@ -352,6 +352,39 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void ResolveEscapeAttempt_EscapeeRollsNaturalTen_SucceedsRegardlessOfTheOpponentsTotal()
+        {
+            // Mirrors ResolveAttack's own natural-10 crit bypass, per the
+            // [Combat] Escape: natural-10 auto-success story — a
+            // guaranteed 10% floor chance to flee even against a Speed
+            // gap that would otherwise make the contested roll near-hopeless.
+            // Seed 8's first roll (the escapee's — see RollSpeedCheck
+            // consumption order) is a natural 10.
+            var player = new Ship(cargoCapacity: 0);
+            var opponent = new Ship(cargoCapacity: 0);
+            opponent.ApplyStatDelta(CoreStat.Speed, 20); // would otherwise make the player's total unreachable
+
+            var result = CombatResolver.ResolveEscapeAttempt(player, opponent, new Random(8));
+
+            Assert.AreEqual(10, result.Roll);
+            Assert.IsTrue(result.WasNaturalTen);
+            Assert.IsTrue(result.Success, "A natural 10 should succeed regardless of the opponent's total.");
+        }
+
+        [Test]
+        public void ResolveEscapeAttempt_EscapeeRollsLessThanTen_WasNaturalTenIsFalse()
+        {
+            var player = new Ship(cargoCapacity: 0);
+            player.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed win via the ordinary contested-total path, not a nat-10
+            var opponent = new Ship(cargoCapacity: 0);
+
+            var result = CombatResolver.ResolveEscapeAttempt(player, opponent, new Random(1)); // seed 1's first roll is 3, not 10
+
+            Assert.IsFalse(result.WasNaturalTen);
+            Assert.IsTrue(result.Success);
+        }
+
+        [Test]
         public void ResolveEscapeAttempt_OpponentRollsRatherThanUsingAFlatSpeedValue()
         {
             var player = new Ship(cargoCapacity: 0);

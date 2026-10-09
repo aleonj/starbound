@@ -120,8 +120,14 @@ namespace StarBound.Combat
         // intercept roll finally resolves.
         public static EscapeAttemptResult DetermineEscapeOutcome(int escapeeRoll, int escapeeTotal, int otherRoll, int otherTotal)
         {
-            var success = escapeeTotal >= otherTotal;
-            return new EscapeAttemptResult(escapeeRoll, escapeeTotal, otherRoll, otherTotal, success);
+            // Mirrors ResolveAttack's own natural-10 bypass (isCriticalHit)
+            // for consistency — a natural 10 on the escapee's own roll
+            // succeeds regardless of the contested total, giving a
+            // guaranteed 10% floor chance to flee even against a Speed
+            // gap that would otherwise make the contested roll near-hopeless.
+            var wasNaturalTen = escapeeRoll == 10;
+            var success = wasNaturalTen || escapeeTotal >= otherTotal;
+            return new EscapeAttemptResult(escapeeRoll, escapeeTotal, otherRoll, otherTotal, success, wasNaturalTen);
         }
 
         // escapee vs. other, not hardcoded to player vs. opponent — lets

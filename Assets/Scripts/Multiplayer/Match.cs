@@ -1077,14 +1077,54 @@ namespace StarBound.Multiplayer
         // is either off the map or itself marked (e.g. boxed in). Takes
         // whichever Player actually escaped — CurrentPlayer for their own
         // PlayerEscaped, OtherPlayer for a PvP OpponentEscaped.
+        // User-requested: an escape shouldn't be able to land on Tradelane
+        // or Wormhole terrain (those exist for passing through, not for
+        // being a destination — same reasoning as goal targets/job
+        // destinations/engagement markers) OR on any hex that would show a
+        // beacon marker (see HexMarkerOverride) — a real engagement, the
+        // race goal's target, or this player's own active job destination.
         private void RelocateAfterEscape(Player player, Random rng)
         {
             var candidates = Map.GetNeighborCoordinates(player.Position)
-                .Where(coordinate => Map.TryGetHex(coordinate, out var hex) && !hex.HasEngagement)
+                .Where(coordinate => IsEligibleEscapeDestination(coordinate, player))
                 .ToList();
 
             if (candidates.Count > 0)
                 player.Position = candidates[rng.Next(candidates.Count)];
+        }
+
+        // Mirrors exactly what HexMarkerOverride would show a beacon for
+        // (plus the Tradelane/Wormhole terrain rule) — a fleeing ship
+        // shouldn't land by chance on any hex that reads as "somewhere you
+        // deliberately navigate to." Checks THIS player's own ActiveJob,
+        // not CurrentPlayer's — RelocateAfterEscape is also called for
+        // OtherPlayer on a PvP OpponentEscaped outcome, and it's their own
+        // job (if any) that matters for them, not whoever's turn it is.
+        private bool IsEligibleEscapeDestination(HexCoordinate coordinate, Player player)
+        {
+            if (!Map.TryGetHex(coordinate, out var hex))
+                return false;
+            if (hex.HasEngagement)
+                return false;
+            if (hex.Terrain == TerrainType.Tradelane || hex.Terrain == TerrainType.Wormhole)
+                return false;
+            if (ActiveGoal != null && ActiveGoal.TargetHex == coordinate)
+                return false;
+
+            if (player.ActiveJob is { } job)
+            {
+                if (job.Type == JobType.Mining && !player.HasMinedCargo)
+                {
+                    if (hex.Terrain == TerrainType.Asteroids)
+                        return false;
+                }
+                else if (job.Destination == coordinate)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         // For the simple one-shot actions (Mine, Trade, Job Board) — always
