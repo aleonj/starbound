@@ -9,7 +9,10 @@ namespace StarBound.Movement
         TargetNotAdjacent,
         TargetTerrainMismatch,
         WormholeDeviceRequired,
-        InsufficientFundsForToll
+        InsufficientFundsForToll,
+        // The die's index is beyond the Ship's current Energy — see
+        // Ship.MaxEnergyValue / ShipMover.TryMove's own check.
+        NotEnoughEnergy
     }
 
     public readonly struct MoveResult

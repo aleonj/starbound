@@ -21,6 +21,20 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void TryRepairOnePoint_WithCostOverride_ChargesTheOverrideNotCostPerPoint()
+        {
+            // MatchVariable.RepairDiscount — Match.RepairStat computes a
+            // discounted cost and passes it in.
+            var ship = new Ship(cargoCapacity: 0, startingMoney: 100);
+            ship.ApplyStatDelta(CoreStat.Hull, -2);
+
+            var result = RepairService.TryRepairOnePoint(ship, CoreStat.Hull, costPerPoint: 5);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(95, ship.Money);
+        }
+
+        [Test]
         public void TryRepairOnePoint_AlreadyAtMax_Fails()
         {
             var ship = new Ship(cargoCapacity: 0, startingMoney: 100);
@@ -42,6 +56,32 @@ namespace StarBound.Tests
 
             Assert.IsFalse(result.Success);
             Assert.AreEqual(RepairFailureReason.InsufficientFunds, result.FailureReason);
+        }
+
+        [Test]
+        public void TryRepairOnePoint_Energy_RepairsUpToMaxEnergyValueNotDefaultStatValue()
+        {
+            // Energy's own ceiling is Ship.MaxEnergyValue (5), not the
+            // shared DefaultStatValue (3) Hull uses — see [Combat]
+            // Energy overhaul.
+            var ship = new Ship(cargoCapacity: 0, startingMoney: 100);
+            ship.ApplyStatDelta(CoreStat.Energy, -2); // Energy = 3 — at Hull's max, but below Energy's own
+
+            var result = RepairService.TryRepairOnePoint(ship, CoreStat.Energy);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(4, ship.GetStat(CoreStat.Energy));
+        }
+
+        [Test]
+        public void TryRepairOnePoint_Energy_AlreadyAtMaxEnergyValue_Fails()
+        {
+            var ship = new Ship(cargoCapacity: 0, startingMoney: 100); // Energy starts at MaxEnergyValue already
+
+            var result = RepairService.TryRepairOnePoint(ship, CoreStat.Energy);
+
+            Assert.IsFalse(result.Success);
+            Assert.AreEqual(RepairFailureReason.AlreadyAtMax, result.FailureReason);
         }
 
         [Test]

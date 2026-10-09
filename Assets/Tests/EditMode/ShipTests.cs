@@ -7,12 +7,14 @@ namespace StarBound.Tests
     public class ShipTests
     {
         [Test]
-        public void NewShip_DefaultsAllCoreStatsToThree()
+        public void NewShip_DefaultsHullWeaponsShieldsSpeedToThreeAndEnergyToMax()
         {
             var ship = new Ship(cargoCapacity: 3);
 
             Assert.AreEqual(3, ship.GetStat(CoreStat.Hull));
-            Assert.AreEqual(3, ship.GetStat(CoreStat.Energy));
+            // Energy starts at its own max, one per movement die, not the
+            // shared baseline every other stat uses — see Ship.MaxEnergyValue.
+            Assert.AreEqual(Ship.MaxEnergyValue, ship.GetStat(CoreStat.Energy));
             Assert.AreEqual(3, ship.GetStat(CoreStat.Weapons));
             Assert.AreEqual(3, ship.GetStat(CoreStat.Shields));
             Assert.AreEqual(3, ship.GetStat(CoreStat.Speed));
@@ -49,13 +51,16 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void IsIntegrityDepleted_TrueWhenEnergyReachesZero()
+        public void IsIntegrityDepleted_FalseWhenOnlyEnergyReachesZero()
         {
+            // Energy is a movement-die economy now, not a second
+            // destruction condition — see IsIntegrityDepleted's own
+            // comment. Only Hull reaching 0 should trigger this.
             var ship = new Ship(cargoCapacity: 3);
 
-            ship.ApplyStatDelta(CoreStat.Energy, -3);
+            ship.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue);
 
-            Assert.IsTrue(ship.IsIntegrityDepleted);
+            Assert.IsFalse(ship.IsIntegrityDepleted);
         }
 
         [Test]

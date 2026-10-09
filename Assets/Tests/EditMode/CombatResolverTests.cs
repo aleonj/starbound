@@ -237,14 +237,14 @@ namespace StarBound.Tests
         [Test]
         public void ResolveAttack_OpponentAttacksAndPlayerBraces_BoostsShieldsAndCostsEnergy()
         {
-            var player = new Ship(cargoCapacity: 0); // Shields default 3, Energy default 3
+            var player = new Ship(cargoCapacity: 0); // Shields default 3, Energy default Ship.MaxEnergyValue
             var opponent = new Ship(cargoCapacity: 0);
 
             var result = CombatResolver.ResolveAttack(player, opponent, RoundAttacker.Opponent, new Random(1), wantsBrace: true);
 
             Assert.IsTrue(result.DefenderBraced);
             Assert.AreEqual(result.DefenseRoll + 3 + CombatResolver.BraceShieldBonus, result.DefenseTotal);
-            Assert.AreEqual(3 - CombatResolver.BraceEnergyCost, player.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue - CombatResolver.BraceEnergyCost, player.GetStat(CoreStat.Energy));
         }
 
         // The mirror direction — previously impossible: the player-attacking
@@ -255,13 +255,13 @@ namespace StarBound.Tests
         public void ResolveAttack_PlayerAttacksAndOpponentBraces_BoostsShieldsAndCostsEnergy()
         {
             var player = new Ship(cargoCapacity: 0);
-            var opponent = new Ship(cargoCapacity: 0); // Shields default 3, Energy default 3
+            var opponent = new Ship(cargoCapacity: 0); // Shields default 3, Energy default Ship.MaxEnergyValue
 
             var result = CombatResolver.ResolveAttack(player, opponent, RoundAttacker.Player, new Random(1), wantsBrace: true);
 
             Assert.IsTrue(result.DefenderBraced);
             Assert.AreEqual(result.DefenseRoll + 3 + CombatResolver.BraceShieldBonus, result.DefenseTotal);
-            Assert.AreEqual(3 - CombatResolver.BraceEnergyCost, opponent.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue - CombatResolver.BraceEnergyCost, opponent.GetStat(CoreStat.Energy));
         }
 
         [Test]
@@ -301,14 +301,14 @@ namespace StarBound.Tests
 
             Assert.IsFalse(result.DefenderBraced);
             Assert.AreEqual(result.DefenseRoll + 3, result.DefenseTotal);
-            Assert.AreEqual(3, player.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue, player.GetStat(CoreStat.Energy));
         }
 
         [Test]
         public void ResolveAttack_WantsBraceButNoEnergy_BraceHasNoEffect()
         {
             var player = new Ship(cargoCapacity: 0);
-            player.ApplyStatDelta(CoreStat.Energy, -3); // Energy = 0
+            player.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue); // Energy = 0
             var opponent = new Ship(cargoCapacity: 0);
 
             var result = CombatResolver.ResolveAttack(player, opponent, RoundAttacker.Opponent, new Random(1), wantsBrace: true);
@@ -324,8 +324,10 @@ namespace StarBound.Tests
         // player's own AttemptEscape does) ---
 
         [Test]
-        public void ResolveEscapeAttempt_Success_NoEnergyLoss()
+        public void ResolveEscapeAttempt_Success_StillCostsOneEnergy()
         {
+            // The attempt itself costs Energy now, win or lose — see
+            // CombatResolver.DetermineEscapeOutcome's own comment.
             var player = new Ship(cargoCapacity: 0);
             player.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed win — exceeds any opponent roll+stat swing
             var opponent = new Ship(cargoCapacity: 0);
@@ -333,7 +335,7 @@ namespace StarBound.Tests
             var result = CombatResolver.ResolveEscapeAttempt(player, opponent, new Random(1));
 
             Assert.IsTrue(result.Success);
-            Assert.AreEqual(3, player.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue - CombatResolver.EscapeAttemptEnergyCost, player.GetStat(CoreStat.Energy));
         }
 
         [Test]
@@ -346,7 +348,7 @@ namespace StarBound.Tests
             var result = CombatResolver.ResolveEscapeAttempt(player, opponent, new Random(1));
 
             Assert.IsFalse(result.Success);
-            Assert.AreEqual(2, player.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue - CombatResolver.EscapeAttemptEnergyCost, player.GetStat(CoreStat.Energy));
         }
 
         [Test]

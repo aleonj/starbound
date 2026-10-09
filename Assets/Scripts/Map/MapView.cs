@@ -28,7 +28,8 @@ namespace StarBound.Map
             IReadOnlyCollection<HexCoordinate> highlighted = null,
             IReadOnlyCollection<HexCoordinate> discoveredEngagementHexes = null,
             HexCoordinate? pendingTarget = null,
-            IReadOnlyCollection<HexCoordinate> waypoints = null)
+            IReadOnlyCollection<HexCoordinate> waypoints = null,
+            HexCoordinate? goalTargetHex = null)
         {
             highlighted ??= System.Array.Empty<HexCoordinate>();
             discoveredEngagementHexes ??= System.Array.Empty<HexCoordinate>();
@@ -40,15 +41,27 @@ namespace StarBound.Map
             {
                 seenCoordinates.Add(hex.Coordinate);
 
-                // Precedence: this-turn movement state always wins over a
-                // job waypoint — if a job's destination also happens to be
-                // a legal/pending move right now, that's the more useful
-                // thing to show.
+                // This-turn movement state only — Waypoint/GoalTarget used
+                // to live here too (see HexHighlightState's own comment),
+                // which made a job destination or the race goal visually
+                // indistinguishable from "you can move here this turn"
+                // and got repeatedly misreported as a stuck highlight.
+                // They're independent marker-channel state now (below),
+                // not mutually exclusive with this any more — a hex can
+                // show both at once (e.g. a job waypoint that also
+                // happens to be a legal move target this turn).
                 var highlightState = pendingTarget.HasValue && hex.Coordinate == pendingTarget.Value
                     ? HexHighlightState.Pending
                     : highlighted.Contains(hex.Coordinate) ? HexHighlightState.LegalTarget
-                    : waypoints.Contains(hex.Coordinate) ? HexHighlightState.Waypoint
                     : HexHighlightState.None;
+
+                // GoalTarget takes priority over Waypoint on the rare hex
+                // where both would otherwise apply (see HexMarkerOverride).
+                var markerOverride = goalTargetHex.HasValue && hex.Coordinate == goalTargetHex.Value
+                    ? HexMarkerOverride.GoalTarget
+                    : waypoints.Contains(hex.Coordinate) ? HexMarkerOverride.Waypoint
+                    : HexMarkerOverride.None;
+
                 var visibleTier = EngagementVisibility.GetVisibleTier(hex, discoveredEngagementHexes);
 
                 if (!tiles.TryGetValue(hex.Coordinate, out var tileView))
@@ -73,7 +86,7 @@ namespace StarBound.Map
                         tileView.SetIsStarport(hex.IsStarport);
                 }
 
-                tileView.SetState(hex.Terrain, visibleTier, highlightState);
+                tileView.SetState(hex.Terrain, visibleTier, highlightState, markerOverride);
             }
 
             // Defensive only — a map's hex set doesn't change mid-match in

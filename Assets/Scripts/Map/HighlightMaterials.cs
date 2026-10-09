@@ -6,7 +6,6 @@ namespace StarBound.Map
     {
         private static Material targetHighlight;
         private static Material pendingHighlight;
-        private static Material waypointHighlight;
         private static Material flashHighlight;
 
         // See TerrainMaterials.Get — `??=` alone isn't enough because a
@@ -21,18 +20,16 @@ namespace StarBound.Map
         public static Material PendingHighlight =>
             pendingHighlight = pendingHighlight != null ? pendingHighlight : CreateMaterial(new Color(0.3f, 0.9f, 1f));
 
-        // Marks a job's destination — deliberately purple, distinct from
-        // both movement colors above, since it means something unrelated
-        // ("go here eventually for a job") rather than "you can move here
-        // this turn."
-        public static Material WaypointHighlight =>
-            waypointHighlight = waypointHighlight != null ? waypointHighlight : CreateMaterial(new Color(0.65f, 0.35f, 0.95f));
+        // Waypoint/GoalTarget used to live here too — see
+        // EngagementMaterials.WaypointBeacon/GoalBeacon, which replaced
+        // them (user-requested: those should look like an undefeated
+        // engagement's marker, not a highlight ring).
 
         // Base color is mostly a fallback — HexTileView.Flash overrides
         // _Color (and _ThrobSpeed/_MinRadius/_MaxRadius/_MaxAlpha) via a
         // MaterialPropertyBlock every time it's actually used, since a
         // one-shot flash needs a caller-chosen color and a fading alpha,
-        // not a single static tint like the three highlights above.
+        // not a single static tint like the highlights above.
         public static Material FlashHighlight =>
             flashHighlight = flashHighlight != null ? flashHighlight : CreateMaterial(new Color(1f, 0.92f, 0.55f));
 

@@ -144,6 +144,11 @@ namespace StarBound.UI
         // non-interactable buttons, this makes spent dice clearly
         // distinct at a glance instead of nearly identical to idle ones.
         private static readonly Color SpentDieColor = new(0.14f, 0.14f, 0.16f);
+        // Distinct from SpentDieColor (a dull amber rather than near-
+        // black) — "locked out by Energy" and "already used this turn"
+        // are different reasons a die is unavailable, see [Combat]
+        // Energy overhaul, and should read differently at a glance.
+        private static readonly Color EnergyLockedDieColor = new(0.32f, 0.26f, 0.1f);
         private static readonly Color ConfirmColor = new(0.2f, 0.7f, 0.3f);
         private static readonly Color AttackColor = new(0.7f, 0.25f, 0.25f);
         // Same RGB as AttackColor above (both read as "destructive/
@@ -329,6 +334,15 @@ namespace StarBound.UI
         // cleanly) if the panel was already collapsed.
         public void Collapse() => SetCollapsed(true);
 
+        // MatchHud calls this on arrival at a hex that makes the active
+        // job's Mine/Deliver button newly available (see
+        // ConfirmPendingMove) — that button lives inside collapsibleContent,
+        // and a move almost always happens right after Collapse() above
+        // already tucked the panel away, so without this the player has
+        // no way to even SEE the button appeared without manually
+        // expanding first (user-reported). A no-op if already expanded.
+        public void Expand() => SetCollapsed(false);
+
         // "Turn:" itself is a static label (see BuildUI's nameColumn) —
         // this only ever sets the player's name on the line below it.
         public void SetHeader(string playerName, Color color)
@@ -460,9 +474,9 @@ namespace StarBound.UI
         // RefreshView() "state changed, resync" hook whenever the hand,
         // selection, move eligibility, or pending move actually changes.
         public void RefreshDiceTray(
-            IReadOnlyList<RolledDie> dice, RolledDie selectedDie, bool hasHand, bool canRoll, bool canMove,
-            bool justRolled, string pendingMoveLabel, Action onRoll, Action<RolledDie> onDieClicked,
-            Action onConfirmMove, Action onCancelMove)
+            IReadOnlyList<RolledDie> dice, RolledDie selectedDie, bool hasHand, bool canRoll, bool hasEnergyToRoll,
+            bool canMove, int currentEnergy, bool justRolled, string pendingMoveLabel, Action onRoll,
+            Action<RolledDie> onDieClicked, Action onConfirmMove, Action onCancelMove)
         {
             // DestroyImmediate, not Destroy — Destroy defers actual
             // removal to end of frame, so the about-to-die old buttons
@@ -502,10 +516,15 @@ namespace StarBound.UI
             {
                 // Rolling now spends an action too (see Match.RollDice) —
                 // with none left, offer nothing to tap rather than a
-                // button that would just throw when pressed.
+                // button that would just throw when pressed. 0 Energy is
+                // a separate reason rolling is blocked (see [Combat]
+                // Energy overhaul) — distinguished so the player knows
+                // WHY, not just that they can't.
                 if (!canRoll)
                 {
-                    diceInstructionText.text = "No actions left to roll dice with.";
+                    diceInstructionText.text = hasEnergyToRoll
+                        ? "No actions left to roll dice with."
+                        : "No Energy left — no movement is possible this turn.";
                     return;
                 }
 
@@ -535,6 +554,20 @@ namespace StarBound.UI
                 if (die.IsSpent)
                 {
                     CreateDieButton(die, SpentDieColor, interactable: false, onDieClicked: null, tumble: false, dieIndex);
+                    dieIndex++;
+                    continue;
+                }
+
+                // A die's own fixed index (0-4) beyond currentEnergy is
+                // locked out (see [Combat] Energy overhaul / ShipMover.
+                // TryMove's matching real gate) — DieIndex, not the loop
+                // index, since dieIndex just counts render order and a
+                // negative DieIndex (the synthetic Wormhole-device die,
+                // see MatchHud's RefreshDiceTray call site) is never
+                // Energy-locked.
+                if (die.DieIndex >= 0 && die.DieIndex >= currentEnergy)
+                {
+                    CreateDieButton(die, EnergyLockedDieColor, interactable: false, onDieClicked: null, tumble: false, dieIndex);
                     dieIndex++;
                     continue;
                 }
@@ -787,6 +820,17 @@ namespace StarBound.UI
             collapseToggleIcon = toggleIcon;
             collapseToggleButton.onClick.AddListener(() => SetCollapsed(!isCollapsed));
 
+            // Sibling of headerRow (NOT inside collapsibleContent below) —
+            // a hazard hit routinely lands right after MatchHud.Collapse()
+            // auto-collapses this panel post-roll (see SetCollapsed's own
+            // comment on why), so a message parented under the collapsible
+            // body was going inactive at exactly the moment it most needed
+            // to be seen (user-reported "panel may not be expanded").
+            // Living at the header level keeps it visible regardless of
+            // collapse state, same as End Turn/pause/locate above.
+            messageText = CreateText(panel.transform, fontSize: 15, bold: false);
+            messageText.gameObject.SetActive(false);
+
             // Everything below the header — toggled as one unit by
             // SetCollapsed rather than juggling each row's visibility
             // individually.
@@ -891,9 +935,6 @@ namespace StarBound.UI
             tradeButton = trade;
             tradeLabel = tradeButton.GetComponentInChildren<Text>();
             tradeButton.gameObject.SetActive(false);
-
-            messageText = CreateText(content, fontSize: 15, bold: false);
-            messageText.gameObject.SetActive(false);
 
             BuildDiceBar(canvasObject.transform);
 

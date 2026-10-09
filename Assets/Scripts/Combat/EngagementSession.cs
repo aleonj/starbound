@@ -47,6 +47,13 @@ namespace StarBound.Combat
         public Ship Opponent { get; }
         public EngagementOutcome Outcome { get; private set; } = EngagementOutcome.InProgress;
 
+        // Set by ApplyAttackOutcome the instant a plain PvE kill pays
+        // out (see DefeatRewardMoney) — null for a PvP win, a loss, or
+        // while the engagement is still in progress. Lets the UI show
+        // exactly what was awarded without needing to know the reward
+        // formula itself.
+        public int? LastKillRewardMoney { get; private set; }
+
         // True when Opponent is another real player's ship (landed on their
         // hex and chose to attack) rather than a generated NPC. PvP wins
         // don't count toward match victory yet — whether they should is
@@ -59,13 +66,51 @@ namespace StarBound.Combat
         // Purely for display; never read by resolution logic.
         public string FlavorText { get; }
 
-        public EngagementSession(EngagementDefinition definition, Player player, Ship opponent, bool isPvP = false, string flavorText = null)
+        // True when this engagement's hex is the player's own active
+        // BountyHunting job's marked Destination (see
+        // EngagementTrigger.TryTrigger, which computes this from
+        // Player.ActiveJob/Position before the session is even
+        // constructed). User-reported: a bounty kill was otherwise
+        // "completely indistinguishable from a normal engagement" —
+        // purely for display (JobService.ResolveBountyOutcome, which
+        // actually pays the reward and clears the job, re-derives this
+        // independently from live state once the engagement concludes;
+        // this flag never drives resolution logic, only what the UI
+        // shows during the fight). BountyRewardMoney mirrors
+        // LastKillRewardMoney's own display-only reasoning — the amount
+        // JobService will pay out on a win, shown ahead of time so the
+        // player knows what's riding on this fight.
+        public bool IsBountyTarget { get; }
+        public int? BountyRewardMoney { get; }
+
+        // True when this engagement's hex is the match's active
+        // DefeatNamedTarget goal's TargetHex (see EngagementTrigger.
+        // TryTrigger, which computes this from Match.ActiveGoal before
+        // the session is constructed — same reasoning/re-derivation
+        // caveat as IsBountyTarget above: Match.HandleProgressionOnEngagementWin
+        // is what actually completes the goal, independently of this
+        // flag). User-reported: found the goal's marked engagement and
+        // "the engagement screen didn't mention it."
+        public bool IsGoalTarget { get; }
+
+        // Applied to DefeatRewardMoney's result — defaults to 1 (normal),
+        // set above 1 only by EngagementTrigger when MatchVariable.
+        // SalvageRush is active at the moment this session is created.
+        // Rounds down like DefeatRewardMoney's own tier amounts.
+        private readonly double rewardMultiplier;
+
+        public EngagementSession(EngagementDefinition definition, Player player, Ship opponent, bool isPvP = false, string flavorText = null,
+            double rewardMultiplier = 1.0, bool isBountyTarget = false, int? bountyRewardMoney = null, bool isGoalTarget = false)
         {
             Definition = definition;
             Player = player;
             Opponent = opponent;
             IsPvP = isPvP;
             FlavorText = flavorText;
+            this.rewardMultiplier = rewardMultiplier;
+            IsBountyTarget = isBountyTarget;
+            BountyRewardMoney = bountyRewardMoney;
+            IsGoalTarget = isGoalTarget;
         }
 
         public bool IsAwaitingAttackResolution => pendingAttacker.HasValue;
@@ -104,6 +149,12 @@ namespace StarBound.Combat
 
             hasAttemptedEscapeThisRound = true;
             pendingEscapee = RoundAttacker.Player;
+            // Charged here, at the moment of commitment — not deferred to
+            // ResolveEscapeIntercept — so the UI reflects the cost the
+            // instant the attempt is made, not only once the other side's
+            // own intercept tap finally resolves it (see
+            // CombatResolver.EscapeAttemptEnergyCost's own comment).
+            PlayerShip.ApplyStatDelta(CoreStat.Energy, -CombatResolver.EscapeAttemptEnergyCost);
             var (roll, total) = CombatResolver.RollSpeedCheck(PlayerShip, rng);
             pendingEscapeeSpeedRoll = roll;
             pendingEscapeeSpeedTotal = total;
@@ -191,7 +242,23 @@ namespace StarBound.Combat
             {
                 Outcome = EngagementOutcome.PlayerWon;
                 if (!IsPvP)
+                {
                     Player.RecordEngagementWin(Definition.Tier);
+                    // A plain kill with no goal/bounty tied to this
+                    // specific marker used to pay nothing at all —
+                    // user-reported. Modest and tier-scaled, well below
+                    // a goal/job's own reward (75-100 — see
+                    // MatchProgressionService/JobPricing), since this
+                    // fires on every ordinary kill, not a bespoke
+                    // mission. Doesn't double-pay when a goal/bounty
+                    // ALSO matches this hex — those are separate,
+                    // additional rewards paid elsewhere (Match.CompleteGoal/
+                    // JobService.ResolveBountyOutcome), same as a job and a
+                    // goal can already both pay out on the same kill today.
+                    var reward = (int)(DefeatRewardMoney(Definition.Tier) * rewardMultiplier);
+                    PlayerShip.AddMoney(reward);
+                    LastKillRewardMoney = reward;
+                }
             }
             else if (PlayerShip.IsIntegrityDepleted)
             {
@@ -202,6 +269,23 @@ namespace StarBound.Combat
                 hasAttemptedEscapeThisRound = false;
             }
         }
+
+        // Placeholder balance, tunable here — same "defined near where
+        // it's paid" convention as MatchProgressionService's own reward
+        // constants.
+        private static int DefeatRewardMoney(EngagementTier tier) => tier switch
+        {
+            EngagementTier.Easy => 15,
+            EngagementTier.Medium => 30,
+            EngagementTier.Hard => 60,
+            _ => 0
+        };
+
+        // MatchVariable.SalvageRush — passed in as this session's own
+        // rewardMultiplier (see EngagementTrigger) rather than read
+        // directly, since this class has no reference to the owning
+        // Match/ActiveVariable.
+        public const double SalvageRushRewardMultiplier = 2.0;
 
         // True exactly when it's the opponent's moment to decide their
         // own defense in a PvP fight — they've just been targeted
@@ -214,10 +298,18 @@ namespace StarBound.Combat
         // the escapee. Checks IsAwaitingDefenseDeclaration rather than
         // the broader IsAwaitingAttackResolution so this correctly turns
         // off the instant they've declared, even though PendingAttacker
-        // itself doesn't change until ExecuteAttack runs.
+        // itself doesn't change until ExecuteAttack runs. Also excludes
+        // IsAwaitingEscapeIntercept — BeginOpponentEscapeAttempt used to
+        // turn this off as a side effect of clearing PendingAttacker
+        // immediately, but that unconditional clear is exactly what
+        // discarded the attacker's already-won initiative on a FAILED
+        // escape (see ApplyEscapeOutcome's own comment); PendingAttacker
+        // is deliberately left alone now, so this needs its own explicit
+        // check for "already mid-escape-attempt, can't also brace/hold."
         public bool CanOpponentDecideDefense =>
             Outcome == EngagementOutcome.InProgress && IsPvP &&
-            IsAwaitingDefenseDeclaration && PendingAttacker == RoundAttacker.Player;
+            IsAwaitingDefenseDeclaration && PendingAttacker == RoundAttacker.Player &&
+            !IsAwaitingEscapeIntercept;
 
         // Single source of truth for "whose moment is this" in a PvP
         // fight — used by EngagementScreen.RebuildActionRow (UI/
@@ -261,9 +353,13 @@ namespace StarBound.Combat
                 throw new InvalidOperationException("The opponent can't decide their defense right now.");
 
             var result = CombatResolver.ResolveEscapeAttempt(Opponent, PlayerShip, rng);
-            // Choosing to flee replaces this round's attack entirely,
-            // succeed or fail — same as the player's own AttemptEscape.
-            pendingAttacker = null;
+            // A successful flee replaces this round's attack entirely —
+            // a FAILED one does NOT: the attacker already won initiative
+            // before this was even offered, so ApplyEscapeOutcome below
+            // leaves pendingAttacker alone and sets up the attack to
+            // still run (see that method's own comment for why — this is
+            // the fix for "initiative gets silently discarded/re-rolled
+            // after a failed opponent escape").
             ApplyEscapeOutcome(RoundAttacker.Opponent, Opponent, result);
             return result;
         }
@@ -275,8 +371,16 @@ namespace StarBound.Combat
             if (!CanOpponentDecideDefense)
                 throw new InvalidOperationException("The opponent can't decide their defense right now.");
 
-            pendingAttacker = null;
+            // pendingAttacker is deliberately left alone here — clearing
+            // it unconditionally (as this used to) discarded the
+            // attacker's already-won initiative even when the escape
+            // then FAILS, forcing a fresh initiative roll next. See
+            // ResolveEscapeIntercept/ApplyEscapeOutcome for where the
+            // actual outcome-dependent handling now lives.
             pendingEscapee = RoundAttacker.Opponent;
+            // Charged here, not deferred to ResolveEscapeIntercept — see
+            // BeginEscapeAttempt's own comment for why.
+            Opponent.ApplyStatDelta(CoreStat.Energy, -CombatResolver.EscapeAttemptEnergyCost);
             var (roll, total) = CombatResolver.RollSpeedCheck(Opponent, rng);
             pendingEscapeeSpeedRoll = roll;
             pendingEscapeeSpeedTotal = total;
@@ -298,8 +402,10 @@ namespace StarBound.Combat
             var otherShip = escapee == RoundAttacker.Player ? Opponent : PlayerShip;
 
             var (otherRoll, otherTotal) = CombatResolver.RollSpeedCheck(otherShip, rng);
+            // Energy was already charged at the matching Begin* call —
+            // see that method's own comment for why.
             var result = CombatResolver.DetermineEscapeOutcome(
-                escapeeShip, pendingEscapeeSpeedRoll!.Value, pendingEscapeeSpeedTotal!.Value, otherRoll, otherTotal);
+                pendingEscapeeSpeedRoll!.Value, pendingEscapeeSpeedTotal!.Value, otherRoll, otherTotal);
 
             pendingEscapee = null;
             pendingEscapeeSpeedRoll = null;
@@ -318,13 +424,36 @@ namespace StarBound.Combat
             if (result.Success)
             {
                 Outcome = escapee == RoundAttacker.Player ? EngagementOutcome.PlayerEscaped : EngagementOutcome.OpponentEscaped;
+                pendingAttacker = null;
+                return;
             }
-            else if (escapeeShip.IsIntegrityDepleted)
+
+            if (escapeeShip.IsIntegrityDepleted)
             {
-                // A failed attempt costs Energy — if that was the last
-                // point, the escapee is beaten, same as a lost attack round.
+                // The attempt itself still cost Energy regardless of
+                // outcome (already charged at the Begin*/Attempt* call —
+                // see CombatResolver.EscapeAttemptEnergyCost), but Energy
+                // no longer feeds IsIntegrityDepleted (see [Combat] Energy
+                // overhaul) — this branch is effectively dead for escape
+                // failures now and only remains reachable if something
+                // else depleted Hull in the same moment.
                 Outcome = escapee == RoundAttacker.Player ? EngagementOutcome.PlayerLost : EngagementOutcome.PlayerWon;
+                pendingAttacker = null;
+                return;
             }
+
+            // Failed, engagement continues. The player's own PRE-initiative
+            // escape (escapee == Player) needs nothing more — pendingAttacker
+            // is already null, since initiative hasn't been rolled yet this
+            // round. The opponent's POST-initiative escape (chosen instead
+            // of bracing) is different: the attacker already won initiative
+            // BEFORE this was even offered, so a failed flee attempt must
+            // not discard that and force a fresh initiative roll (the bug
+            // this fixes — see AttemptOpponentEscape/BeginOpponentEscapeAttempt's
+            // own comments). Treat it the same as declaring Hold instead:
+            // the attacker still gets to execute their already-won attack.
+            if (escapee == RoundAttacker.Opponent)
+                pendingDefenderWantsBrace = false;
         }
     }
 }

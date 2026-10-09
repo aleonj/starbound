@@ -19,7 +19,7 @@ namespace StarBound.Map
 
         public static GameMap Generate(int radius, Difficulty difficulty, int seed)
         {
-            var map = new GameMap(radius, difficulty);
+            var map = new GameMap(radius, difficulty, seed);
             var rng = new Random(seed);
 
             foreach (var coordinate in EnumerateCoordinates(radius))

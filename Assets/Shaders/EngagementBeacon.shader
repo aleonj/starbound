@@ -4,7 +4,7 @@
 // pulsing core, all tier-colored. Drawn on the same small hex-canvas
 // quad HexTileView already builds (see HexMeshFactory), used purely as
 // a transparent UV-mapped canvas — same "procedural shape, transparent
-// outside it" approach as ShipCraft.shader — so the terrain shader
+// outside it" approach terrain shaders use — so the terrain shader
 // underneath stays fully visible around the beacon instead of being
 // covered by a filled color.
 Shader "StarBound/EngagementBeacon"
@@ -69,11 +69,16 @@ Shader "StarBound/EngagementBeacon"
                 // core — without this, the beacon's thin bright elements
                 // have no contrast against busy/similarly-toned terrain
                 // underneath (a green beacon over a greenish Tradelane
-                // hub, for instance, all but disappeared). This guarantees
-                // legibility regardless of what terrain sits underneath.
+                // hub, for instance, all but disappeared). User-reported:
+                // still not legible against PlanetSpin specifically — the
+                // busiest, brightest terrain in the game (banded surface
+                // plus atmosphere/rim glow, filling most of the tile) — so
+                // the original 0.45 opacity let too much of it bleed
+                // through. This guarantees legibility regardless of what
+                // terrain sits underneath.
                 const float padRadius = 0.8;
                 float pad = 1.0 - smoothstep(padRadius - 0.08, padRadius, dist);
-                float padAlpha = pad * 0.45;
+                float padAlpha = pad * 0.8;
 
                 // Rotating dashed ring — reads as an active scanning
                 // signal rather than a static painted circle. Widened
@@ -97,7 +102,7 @@ Shader "StarBound/EngagementBeacon"
                 float ticks = max(max(northTick, southTick), max(eastTick, westTick));
 
                 // Pulsing core+halo, same light technique used everywhere
-                // else in the game (MinesHazard/ShipCraft engine glow).
+                // else in the game (MinesHazard's warning light, etc.).
                 const float coreRadius = 0.24;
                 float core = 1.0 - smoothstep(coreRadius * 0.4, coreRadius * 0.8, dist);
                 float halo = 1.0 - smoothstep(coreRadius * 0.6, coreRadius * 1.8, dist);
@@ -108,7 +113,16 @@ Shader "StarBound/EngagementBeacon"
                 if (alpha <= 0.0)
                     return float4(0, 0, 0, 0);
 
-                float3 brightColor = _Color.rgb * (1.0 + pulse * 0.4) + _Color.rgb * core * 0.7;
+                // Whitened slightly (not pure _Color) — a dark pad alone
+                // still isn't enough when the terrain underneath happens
+                // to share the beacon's own hue (a violet Waypoint beacon
+                // over a purple-banded planet, user-reported), since a
+                // colored element surrounded by a dark ring of the SAME
+                // color family reads as low-contrast even at full
+                // opacity. Blending toward white separates the beacon's
+                // luminance from the terrain's regardless of hue overlap.
+                float3 whitenedColor = lerp(_Color.rgb, float3(1, 1, 1), 0.3);
+                float3 brightColor = whitenedColor * (1.0 + pulse * 0.4) + whitenedColor * core * 0.7;
                 float3 color = lerp(float3(0, 0, 0), brightColor, elementsMask);
 
                 return float4(color, alpha);

@@ -81,25 +81,32 @@ namespace StarBound.Map
 
         // Called on every Render pass after the first — repaints the
         // existing tile/highlight/marker in place, no GameObjects created
-        // or destroyed.
-        public void SetState(TerrainType terrain, EngagementTier tier, HexHighlightState highlightState)
+        // or destroyed. markerOverride (Waypoint/GoalTarget) only applies
+        // to the marker when there's no real engagement tier on this hex
+        // already — see HexMarkerOverride's own comment on why a true
+        // tier always wins.
+        public void SetState(TerrainType terrain, EngagementTier tier, HexHighlightState highlightState, HexMarkerOverride markerOverride = HexMarkerOverride.None)
         {
             GetComponent<MeshRenderer>().sharedMaterial = TerrainMaterials.Get(terrain);
 
             highlightRenderer.gameObject.SetActive(highlightState != HexHighlightState.None);
             if (highlightState != HexHighlightState.None)
             {
-                highlightRenderer.sharedMaterial = highlightState switch
-                {
-                    HexHighlightState.Pending => HighlightMaterials.PendingHighlight,
-                    HexHighlightState.Waypoint => HighlightMaterials.WaypointHighlight,
-                    _ => HighlightMaterials.TargetHighlight
-                };
+                highlightRenderer.sharedMaterial = highlightState == HexHighlightState.Pending
+                    ? HighlightMaterials.PendingHighlight
+                    : HighlightMaterials.TargetHighlight;
             }
 
-            markerRenderer.gameObject.SetActive(tier != EngagementTier.None);
-            if (tier != EngagementTier.None)
-                markerRenderer.sharedMaterial = EngagementMaterials.Get(tier);
+            var markerActive = tier != EngagementTier.None || markerOverride != HexMarkerOverride.None;
+            markerRenderer.gameObject.SetActive(markerActive);
+            if (markerActive)
+            {
+                markerRenderer.sharedMaterial = tier != EngagementTier.None
+                    ? EngagementMaterials.Get(tier)
+                    : markerOverride == HexMarkerOverride.GoalTarget
+                        ? EngagementMaterials.GoalBeacon
+                        : EngagementMaterials.WaypointBeacon;
+            }
         }
 
         // A one-shot attention pulse (e.g. "locate my ship") — distinct

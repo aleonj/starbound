@@ -42,6 +42,28 @@ namespace StarBound.Multiplayer
         // for where each piece is actually wired in.
         private const int EngagementsPerProgressionEvent = 2;
 
+        // Variable events (MatchVariable) fire on their OWN independent
+        // win-counter now — decoupled from goal events (see
+        // HandleProgressionOnEngagementWin's own comment for why: they
+        // used to be bundled into one combined event, tying unrelated
+        // mechanics to the same cadence, and tying event turnover to
+        // goal pacing meant a variable could get "stuck" active for the
+        // whole rest of the match once Hard tier unlocked and goal
+        // events stopped firing). Same starting value as goals, tunable
+        // independently.
+        private const int EngagementsPerVariableEvent = 2;
+
+        // [Combat] Energy overhaul — the forced floor-reset after a
+        // 0-Energy turn (see EndTurn) is a deliberate fixed value, NOT
+        // derived from the ordinary banking formula: at 0 usable dice
+        // every rolled die is already "unused" by construction, which
+        // would otherwise bank the full Ship.MaxEnergyValue in one go
+        // and erase the intended one-turn cost. A smaller explicit
+        // floor also avoids a soft-lock — 0 usable dice means the
+        // player can never CHOOSE to under-use dice to recover through
+        // banking alone.
+        private const int EnergyFloorResetValue = 2;
+
         private DiceHand currentHand;
         private EngagementSession activeEngagement;
         private TradeNegotiation activeTradeNegotiation;
@@ -61,6 +83,25 @@ namespace StarBound.Multiplayer
         private bool moveSessionPaid;
         private bool hasMovedThisTurn;
         private int successfulEngagementsSinceLastEvent;
+        private int successfulEngagementsSinceLastVariableEvent;
+
+        // Snapshot of each player's Energy at the moment THEIR turn
+        // began — read back at the end of that same turn (see EndTurn)
+        // to decide whether this was a forced 0-usable-dice turn and so
+        // whether the floor-reset applies instead of ordinary banking.
+        // Keyed per-player rather than a single flag since turns
+        // alternate between PlayerOne/PlayerTwo.
+        private readonly Dictionary<Player, int> energyAtTurnStart = new();
+
+        // Set whenever an engagement starts mid-turn (an ambush via
+        // HandleArrival, or AttackOpponent) — both forcibly ExhaustActions,
+        // cutting the turn short through no choice of the player's. Read
+        // (and reset) by EndTurn's own banking step: dice still unspent
+        // at that point were never a genuine "I could have kept moving
+        // but chose not to," so they shouldn't bank Energy the way a
+        // deliberately-ended turn with dice to spare would — see
+        // ApplyEnergyForEndingTurn.
+        private bool engagementOccurredThisTurn;
 
         public GameMap Map { get; }
         public Player PlayerOne { get; }
@@ -102,6 +143,9 @@ namespace StarBound.Multiplayer
             PlayerOne = playerOne;
             PlayerTwo = playerTwo;
             CurrentPlayer = playerOne;
+
+            energyAtTurnStart[playerOne] = playerOne.Ship.GetStat(CoreStat.Energy);
+            energyAtTurnStart[playerTwo] = playerTwo.Ship.GetStat(CoreStat.Energy);
         }
 
         public DiceHand CurrentHand => currentHand;
@@ -214,6 +258,7 @@ namespace StarBound.Multiplayer
         // continuous use of that turn's movement, not a separate action.
         public bool CanTravelWormhole =>
             !IsInEngagement && !IsComplete && !IsNegotiatingTrade &&
+            ActiveVariable != MatchVariable.IonStorm &&
             (moveSessionPaid || actionsUsed < ActionsPerTurn) &&
             CurrentPlayer.Ship.HeldItems.Contains(ItemPool.WormholeDevice) &&
             Map.TryGetHex(CurrentPlayer.Position, out var currentHex) && currentHex.Terrain == TerrainType.Wormhole;
@@ -226,9 +271,15 @@ namespace StarBound.Multiplayer
         // (and pays for) the Move session, not the first successful move
         // (see RollDice). A 0-budget roll would just hand the player a
         // dice hand CanMove can never legally spend, so it's blocked here
-        // rather than silently producing a useless roll.
+        // rather than silently producing a useless roll. Also gated on
+        // Energy (see [Combat] Energy overhaul) — at 0, none of the 5
+        // rolled dice would be usable anyway (see ShipMover.TryMove's
+        // own Energy check), so rolling is blocked outright with a
+        // distinguishable reason rather than handing over a hand of
+        // dice that can never legally move.
         public bool CanRollDice =>
-            !IsInEngagement && !IsComplete && !IsNegotiatingTrade && currentHand == null && actionsUsed < ActionsPerTurn;
+            !IsInEngagement && !IsComplete && !IsNegotiatingTrade && currentHand == null && actionsUsed < ActionsPerTurn
+            && CurrentPlayer.Ship.GetStat(CoreStat.Energy) > 0;
 
         public DiceHand RollDice(Random rng)
         {
@@ -239,8 +290,10 @@ namespace StarBound.Multiplayer
                 throw new InvalidOperationException("Dice have already been rolled this turn.");
             if (actionsUsed >= ActionsPerTurn)
                 throw new InvalidOperationException("No actions remaining to roll dice with.");
+            if (CurrentPlayer.Ship.GetStat(CoreStat.Energy) <= 0)
+                throw new InvalidOperationException("No Energy left to move with this turn.");
 
-            currentHand = DiceRoller.Roll(rng);
+            currentHand = DiceRoller.Roll(rng, Map);
             // Rolling itself now spends the Move session's action —
             // previously only an actual move did (see Move's own
             // ConsumeActionForSession call below), which let a player roll
@@ -268,7 +321,13 @@ namespace StarBound.Multiplayer
             if (!CanMove)
                 throw new InvalidOperationException("Movement has already ended for this turn.");
 
-            var result = ShipMover.TryMove(Map, die, CurrentPlayer, to, waiveTradelaneToll: ActiveVariable == MatchVariable.TradeBoom);
+            var tollPerHex = ActiveVariable switch
+            {
+                MatchVariable.TradeBoom => 0,
+                MatchVariable.FuelShortage => TollPricing.TradelaneTollPerHex * TollPricing.FuelShortageTollMultiplier,
+                _ => TollPricing.TradelaneTollPerHex
+            };
+            var result = ShipMover.TryMove(Map, die, CurrentPlayer, to, tollPerHex);
             if (!result.Success)
                 return result;
 
@@ -331,10 +390,25 @@ namespace StarBound.Multiplayer
             // marker — it's placed at the player's current MaxUnlockedTier
             // (see MatchProgressionService), so it's always already within
             // the normal gating ceiling.
-            var session = EngagementTrigger.TryTrigger(CurrentPlayer, Map, rng, MaxUnlockedTier);
+            var statBoost = ActiveVariable == MatchVariable.PirateSurge ? EngagementTrigger.PirateSurgeStatBoost : 0;
+            var rewardMultiplier = ActiveVariable == MatchVariable.SalvageRush ? EngagementSession.SalvageRushRewardMultiplier : 1.0;
+            // Only DefeatNamedTarget, not just "coordinates happen to
+            // match" — a TravelAndPay goal's target hex has no exclusion
+            // against already-marked hexes, so it COULD coincidentally
+            // overlap an ambient engagement, but fighting (and winning)
+            // that engagement does nothing toward completing a
+            // TravelAndPay goal (only arrival + having enough money
+            // does, independent of combat). Tagging the fight screen
+            // "Race Goal" there would wrongly imply this fight matters
+            // for it. (The hex-info popup's own, separate "This is the
+            // race goal's target" line has no such restriction — that's
+            // a travel/arrival fact, correct for either goal type.)
+            var goalTargetHex = ActiveGoal is { Type: MatchGoalType.DefeatNamedTarget } ? ActiveGoal.TargetHex : (HexCoordinate?)null;
+            var session = EngagementTrigger.TryTrigger(CurrentPlayer, Map, rng, MaxUnlockedTier, statBoost, rewardMultiplier, goalTargetHex);
             if (session != null)
             {
                 activeEngagement = session;
+                engagementOccurredThisTurn = true;
                 ExhaustActions(); // an ambush spends the whole remaining budget
             }
 
@@ -359,12 +433,23 @@ namespace StarBound.Multiplayer
             if (hex == null)
                 return false;
 
+            // CalmSpace applies uniformly to both hazard terrains — checked
+            // first on each branch so it can't be shadowed by the other
+            // terrain-specific variables below.
             var damageChance = hex.Terrain switch
             {
-                TerrainType.Asteroids => HazardChances.AsteroidDamageChance,
-                TerrainType.Mines => ActiveVariable == MatchVariable.MinefieldDamage
-                    ? HazardChances.MinefieldDamageChanceDuringAlert
-                    : HazardChances.MinefieldDamageChance,
+                TerrainType.Asteroids => ActiveVariable switch
+                {
+                    MatchVariable.CalmSpace => HazardChances.CalmSpaceHazardChance,
+                    MatchVariable.AsteroidStorm => HazardChances.AsteroidDamageChanceDuringStorm,
+                    _ => HazardChances.AsteroidDamageChance
+                },
+                TerrainType.Mines => ActiveVariable switch
+                {
+                    MatchVariable.CalmSpace => HazardChances.CalmSpaceHazardChance,
+                    MatchVariable.MinefieldDamage => HazardChances.MinefieldDamageChanceDuringAlert,
+                    _ => HazardChances.MinefieldDamageChance
+                },
                 _ => 0.0
             };
 
@@ -406,7 +491,20 @@ namespace StarBound.Multiplayer
 
             var nextTier = NextUnlockTier();
             if (BothPlayersReadyFor(nextTier))
+            {
                 MaxUnlockedTier = nextTier;
+
+                // Both players, not just awardee — the ceiling is shared
+                // (see this method's own doc comment), so whoever isn't
+                // holding the device right now still needs to find out.
+                // A separate slot from PendingTurnStartNotice (see
+                // Player.PendingTierUnlockNotice) rather than that one,
+                // since this and an ordinary turn-start notice can both
+                // land on the same player within one turn's two actions.
+                var notice = $"{nextTier} engagements are now unlocked!";
+                PlayerOne.SetPendingTierUnlockNotice(notice);
+                PlayerTwo.SetPendingTierUnlockNotice(notice);
+            }
 
             ActiveGoal = null;
         }
@@ -433,15 +531,25 @@ namespace StarBound.Multiplayer
             IsReadyForTier(PlayerOne.Ship, tier) && IsReadyForTier(PlayerTwo.Ship, tier);
 
         // Called only for a real (non-PvP) engagement win — see
-        // ResolveActiveEngagement. Two independent things can happen on
-        // the same win: it might be the one that finally defeats the
-        // active DefeatNamedTarget goal, and/or it might be the one that
-        // crosses the threshold for a brand new event to fire (only once
-        // no goal is currently active and there's still a tier left to
-        // unlock).
+        // ResolveActiveEngagement, whose own call site already excludes
+        // PvP, so neither counter below ever moves on a PvP win. Three
+        // independent things can happen on the same win: it might be the
+        // one that finally defeats the active DefeatNamedTarget goal,
+        // and/or it might cross the threshold for a brand new GOAL event
+        // (only once no goal is currently active and there's still a
+        // tier left to unlock), and/or it might independently cross the
+        // threshold for a brand new VARIABLE event. Goal and variable
+        // events used to be bundled into one combined event, drawn and
+        // replaced together — decoupled now (see their own counters and
+        // MatchProgressionService) so a hazard/economy modifier isn't
+        // tied to goal pacing, and so it keeps cycling for the rest of
+        // the match instead of getting stuck once Hard tier unlocks and
+        // goal events stop firing (variable firing is deliberately NOT
+        // gated on MaxUnlockedTier the way goal firing is).
         private void HandleProgressionOnEngagementWin(HexCoordinate resolvedHex, Random rng)
         {
             successfulEngagementsSinceLastEvent++;
+            successfulEngagementsSinceLastVariableEvent++;
 
             if (ActiveGoal is { Type: MatchGoalType.DefeatNamedTarget } goal && resolvedHex == goal.TargetHex)
                 CompleteGoal(CurrentPlayer);
@@ -449,11 +557,28 @@ namespace StarBound.Multiplayer
             if (ActiveGoal == null && MaxUnlockedTier < EngagementTier.Hard &&
                 successfulEngagementsSinceLastEvent >= EngagementsPerProgressionEvent)
             {
-                var (variable, newGoal) = MatchProgressionService.FireEvent(
-                    Map, PlayerOne.Position, PlayerTwo.Position, MaxUnlockedTier, rng);
-                ActiveVariable = variable;
-                ActiveGoal = newGoal;
+                ActiveGoal = MatchProgressionService.FireGoalEvent(Map, PlayerOne.Position, PlayerTwo.Position, MaxUnlockedTier, rng);
                 successfulEngagementsSinceLastEvent = 0;
+
+                // Same gap this match-global variable event had before it
+                // got PendingVariableEventNotice — a goal used to only ever
+                // show up as a passive status label, never announced.
+                var goalNotice = $"New Goal: {MatchGoalDescriptions.Describe(Map, ActiveGoal)}";
+                PlayerOne.SetPendingGoalNotice(goalNotice);
+                PlayerTwo.SetPendingGoalNotice(goalNotice);
+            }
+
+            if (successfulEngagementsSinceLastVariableEvent >= EngagementsPerVariableEvent)
+            {
+                ActiveVariable = MatchProgressionService.PickVariable(rng, ActiveVariable);
+                successfulEngagementsSinceLastVariableEvent = 0;
+
+                // Both players, not just whoever just won — this is
+                // shared match state, same reasoning (and same separate-
+                // slot rationale) as the tier-unlock notice above.
+                var notice = $"New Event: {MatchVariableDescriptions.Describe(ActiveVariable)}";
+                PlayerOne.SetPendingVariableEventNotice(notice);
+                PlayerTwo.SetPendingVariableEventNotice(notice);
             }
         }
 
@@ -475,6 +600,7 @@ namespace StarBound.Multiplayer
             var definition = new EngagementDefinition(
                 EngagementTier.None, hullRange: (0, 0), weaponsRange: (0, 0), shieldsRange: (0, 0), speedRange: (0, 0));
             activeEngagement = new EngagementSession(definition, CurrentPlayer, OtherPlayer.Ship, isPvP: true);
+            engagementOccurredThisTurn = true;
             ExhaustActions();
         }
 
@@ -676,7 +802,10 @@ namespace StarBound.Multiplayer
             if (!CanShop)
                 throw new InvalidOperationException("Can't shop right now.");
 
-            var result = ShopService.TryPurchase(CurrentPlayer.Ship, item);
+            var price = ActiveVariable == MatchVariable.MarketCrash
+                ? (int)(item.Price * ItemPricing.MarketCrashDiscountMultiplier)
+                : item.Price;
+            var result = ShopService.TryPurchase(CurrentPlayer.Ship, item, price);
             if (result.Success)
             {
                 ConsumeActionForSession(ActionSession.Market);
@@ -725,7 +854,10 @@ namespace StarBound.Multiplayer
             if (!CanShop)
                 throw new InvalidOperationException("Can't shop right now.");
 
-            var result = RepairService.TryRepairOnePoint(CurrentPlayer.Ship, stat);
+            var costPerPoint = ActiveVariable == MatchVariable.RepairDiscount
+                ? (int)(RepairService.CostPerPoint * RepairService.RepairDiscountMultiplier)
+                : RepairService.CostPerPoint;
+            var result = RepairService.TryRepairOnePoint(CurrentPlayer.Ship, stat, costPerPoint);
             if (result.Success)
                 ConsumeActionForSession(ActionSession.Market);
             return result;
@@ -857,6 +989,9 @@ namespace StarBound.Multiplayer
             if (IsNegotiatingTrade)
                 throw new InvalidOperationException("Can't end turn mid-negotiation.");
 
+            ApplyEnergyForEndingTurn();
+            engagementOccurredThisTurn = false;
+
             currentHand = null; // unspent dice are discarded, no carryover
             actionsUsed = 0;
             openSession = ActionSession.None;
@@ -864,6 +999,65 @@ namespace StarBound.Multiplayer
             hasMovedThisTurn = false;
             CurrentPlayer = CurrentPlayer == PlayerOne ? PlayerTwo : PlayerOne;
             TurnNumber++;
+
+            // Snapshot the NEW CurrentPlayer's Energy right as their turn
+            // begins — read back by their own future EndTurn call above.
+            energyAtTurnStart[CurrentPlayer] = CurrentPlayer.Ship.GetStat(CoreStat.Energy);
+        }
+
+        // [Combat] Energy overhaul — exactly one of two mutually
+        // exclusive outcomes for the player whose turn is ending:
+        //   - This turn started at 0 Energy (see energyAtTurnStart) —
+        //     a forced floor-reset up to EnergyFloorResetValue, not the
+        //     ordinary banking formula below (see that constant's own
+        //     comment for why banking alone can't be used here).
+        //   - Otherwise, ordinary banking: 1 Energy per rolled die that
+        //     went unspent this turn, capped at Ship.MaxEnergyValue.
+        //     Never rolling at all banks nothing — "fewer than the
+        //     AVAILABLE dice" implies dice were actually made available
+        //     by rolling; otherwise skipping the roll entirely would be
+        //     a strictly better way to "bank" than actually engaging
+        //     with the dice system, which would make rolling pointless.
+        //     An engagement starting mid-turn ALSO banks nothing, even
+        //     with dice left unspent — ExhaustActions cut the turn
+        //     short through no choice of the player's (an ambush, or
+        //     choosing to Attack instead of continuing to move), so
+        //     those leftover dice were never a genuine "could have kept
+        //     moving but chose not to." Without this, a 1-Energy escape
+        //     attempt (or several) would routinely get refunded in full
+        //     by whatever dice the ambush happened to leave unspent,
+        //     making Energy cost nothing at exactly the moment — combat
+        //     — it's supposed to matter most. See engagementOccurredThisTurn.
+        private void ApplyEnergyForEndingTurn()
+        {
+            var ship = CurrentPlayer.Ship;
+            var startedTurnAtZeroEnergy = energyAtTurnStart.TryGetValue(CurrentPlayer, out var startingEnergy) && startingEnergy <= 0;
+
+            if (startedTurnAtZeroEnergy)
+            {
+                var current = ship.GetStat(CoreStat.Energy);
+                if (current < EnergyFloorResetValue)
+                    ship.ApplyStatDelta(CoreStat.Energy, EnergyFloorResetValue - current);
+                return;
+            }
+
+            if (engagementOccurredThisTurn || currentHand == null)
+                return;
+
+            // Only dice within the Energy cap count as "left unused" —
+            // a die whose own index is beyond the player's Energy was
+            // never usable in the first place (see ShipMover.TryMove's
+            // matching real gate), so it was never a choice to hold
+            // back and shouldn't inflate the bank. Energy can't have
+            // changed mid-turn here (nothing outside combat touches it,
+            // and any combat this turn already bailed out above via
+            // engagementOccurredThisTurn), so the cap was constant for
+            // the whole turn — today's GetStat(Energy) is exactly it.
+            var currentEnergy = ship.GetStat(CoreStat.Energy);
+            var unspentCount = currentHand.UnspentDice.Count(d => d.DieIndex < currentEnergy);
+            var bankable = Math.Min(unspentCount, Ship.MaxEnergyValue - currentEnergy);
+            if (bankable > 0)
+                ship.ApplyStatDelta(CoreStat.Energy, bankable);
         }
 
         // No engagement/negotiation guard needed — unlike EndTurn, the

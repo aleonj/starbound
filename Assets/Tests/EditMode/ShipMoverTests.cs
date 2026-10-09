@@ -145,11 +145,28 @@ namespace StarBound.Tests
             var die = new RolledDie(0, TerrainType.Tradelane);
             var player = BuildPlayer(new HexCoordinate(0, 0), money: 0);
 
-            var result = ShipMover.TryMove(map, die, player, to: new HexCoordinate(1, 0), waiveTradelaneToll: true);
+            var result = ShipMover.TryMove(map, die, player, to: new HexCoordinate(1, 0), tollPerHex: 0);
 
             Assert.IsTrue(result.Success);
             Assert.IsTrue(die.IsSpent);
             Assert.AreEqual(0, player.Ship.Money);
+        }
+
+        [Test]
+        public void TryMove_OntoTradelane_WithRaisedToll_ChargesTheRaisedAmount()
+        {
+            // MatchVariable.FuelShortage — tollPerHex generalizes the old
+            // waive-only bool to any amount, including one ABOVE the
+            // normal default.
+            var map = BuildMapWithTollAndWormholeHexes();
+            var die = new RolledDie(0, TerrainType.Tradelane);
+            var player = BuildPlayer(new HexCoordinate(0, 0), money: 10);
+            var raisedToll = TollPricing.TradelaneTollPerHex * TollPricing.FuelShortageTollMultiplier;
+
+            var result = ShipMover.TryMove(map, die, player, to: new HexCoordinate(1, 0), tollPerHex: raisedToll);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(10 - raisedToll, player.Ship.Money);
         }
 
         [Test]

@@ -13,13 +13,24 @@ namespace StarBound.Core
         public int Radius { get; }
         public IReadOnlyCollection<Hex> Hexes => hexes.Values;
 
-        public GameMap(int radius, Difficulty difficulty)
+        // The generation seed this map was built with (see
+        // MapGenerator.Generate) — exposed so per-hex derived content can
+        // stay deterministic for the lifetime of one match (same map,
+        // same seed) while still varying across different matches, same
+        // as generation itself. Optional/defaulted so every existing
+        // direct-construction call site (tests mainly, which build hexes
+        // by hand rather than via MapGenerator) keeps compiling unchanged
+        // — those just don't care what Seed resolves to.
+        public int Seed { get; }
+
+        public GameMap(int radius, Difficulty difficulty, int seed = 0)
         {
             if (radius < 0)
                 throw new ArgumentOutOfRangeException(nameof(radius));
 
             Radius = radius;
             Difficulty = difficulty;
+            Seed = seed;
         }
 
         public void SetHex(Hex hex)

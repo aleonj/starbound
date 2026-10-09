@@ -38,6 +38,25 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void GenerateOffer_WithRewardMultiplier_ScalesEveryJobTypesReward()
+        {
+            // MatchVariable.BountySeason — applies to ALL job types in a
+            // freshly generated offer, not just bounties, per its own
+            // "job board rewards" framing.
+            var map = BuildMap();
+            var currentPlanet = new HexCoordinate(0, 0);
+            var otherPlanet = new HexCoordinate(2, 0);
+            var distance = HexMath.Distance(currentPlanet, otherPlanet);
+
+            var offer = JobOfferGenerator.GenerateOffer(new Random(1), currentPlanet, map, EngagementTier.Easy, JobOfferGenerator.BountySeasonRewardMultiplier);
+
+            var mining = offer.Single(j => j.Type == JobType.Mining);
+            var bounty = offer.Single(j => j.Type == JobType.BountyHunting);
+            Assert.AreEqual((int)(distance * JobPricing.MiningRewardPerHexDistance * JobOfferGenerator.BountySeasonRewardMultiplier), mining.Reward);
+            Assert.AreEqual((int)(JobPricing.BountyReward(EngagementTier.Easy) * JobOfferGenerator.BountySeasonRewardMultiplier), bounty.Reward);
+        }
+
+        [Test]
         public void GenerateOffer_IncludesBountyForMarkedEngagementHex()
         {
             var map = BuildMap();

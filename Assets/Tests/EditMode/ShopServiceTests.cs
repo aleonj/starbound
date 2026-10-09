@@ -21,6 +21,23 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void TryPurchase_WithPriceOverride_ChargesTheOverrideNotItemPrice()
+        {
+            // MatchVariable.MarketCrash — Match.BuyItem computes a
+            // discounted price and passes it in rather than this
+            // service reading item.Price directly, so the amount
+            // actually charged matches what the purchase confirmation
+            // shows.
+            var ship = new Ship(cargoCapacity: 3, startingMoney: 200);
+            var item = new ItemDefinition("Weapons Upgrade +1", CoreStat.Weapons, 1, 50);
+
+            var result = ShopService.TryPurchase(ship, item, price: 25);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(175, ship.Money);
+        }
+
+        [Test]
         public void TryPurchase_InsufficientFunds_Fails()
         {
             var ship = new Ship(cargoCapacity: 3, startingMoney: 10);

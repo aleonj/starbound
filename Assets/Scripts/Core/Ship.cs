@@ -9,10 +9,17 @@ namespace StarBound.Core
         public const int DefaultStatValue = 3;
         public const int MinStatValue = 0;
 
+        // Energy's own ceiling, separate from DefaultStatValue — it's a
+        // movement-die economy now (one point per movement die per
+        // turn, see Match.RollDice/EndTurn), not a combat stat scaled
+        // against NPC ranges the way Weapons/Shields/Speed are, so it
+        // doesn't share their baseline-3 starting point.
+        public const int MaxEnergyValue = 5;
+
         private readonly Dictionary<CoreStat, int> stats = new()
         {
             { CoreStat.Hull, DefaultStatValue },
-            { CoreStat.Energy, DefaultStatValue },
+            { CoreStat.Energy, MaxEnergyValue },
             { CoreStat.Weapons, DefaultStatValue },
             { CoreStat.Shields, DefaultStatValue },
             { CoreStat.Speed, DefaultStatValue },
@@ -51,10 +58,13 @@ namespace StarBound.Core
             stats[stat] = Math.Max(MinStatValue, stats[stat] + delta);
         }
 
-        // True when Hull or Energy has hit zero — triggers the
-        // [Combat] Zero Hull/Energy penalty rule.
+        // True when Hull has hit zero — triggers the [Combat] Zero Hull
+        // penalty rule. Energy deliberately does NOT contribute here any
+        // more (see [Combat] Energy overhaul) — it's a movement-die
+        // economy, not a second destruction condition; hitting 0 Energy
+        // costs a turn's movement, not the ship.
         public bool IsIntegrityDepleted =>
-            GetStat(CoreStat.Hull) <= MinStatValue || GetStat(CoreStat.Energy) <= MinStatValue;
+            GetStat(CoreStat.Hull) <= MinStatValue;
 
         public void AddMoney(int amount)
         {
@@ -128,17 +138,18 @@ namespace StarBound.Core
         }
 
         // [Combat] Bug: Hull/Energy not reset after zero-integrity penalty
-        // — without this, a depleted player was left stuck at 0 Hull/
-        // Energy with no money to repair either (see
-        // ClearMoneyAndNonPermanentItems above), unable to meaningfully
-        // continue. Resets both stats together, not just whichever one
-        // triggered the penalty, since this is a fresh start after
-        // respawning — same "everything reset" treatment as the
-        // money/consumables wipe.
+        // — without this, a depleted player was left stuck at 0 Hull
+        // with no money to repair (see ClearMoneyAndNonPermanentItems
+        // above), unable to meaningfully continue. Resets both stats
+        // together, not just Hull (the only one that can trigger this
+        // now — see IsIntegrityDepleted), since this is a fresh start
+        // after respawning — same "everything reset" treatment as the
+        // money/consumables wipe. Energy resets to its own ceiling, not
+        // DefaultStatValue — see MaxEnergyValue.
         public void ResetIntegrityStats()
         {
             stats[CoreStat.Hull] = DefaultStatValue;
-            stats[CoreStat.Energy] = DefaultStatValue;
+            stats[CoreStat.Energy] = MaxEnergyValue;
         }
     }
 }

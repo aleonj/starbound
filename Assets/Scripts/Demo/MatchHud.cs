@@ -24,6 +24,11 @@ namespace StarBound.Demo
     {
         private static readonly Color PlayerOneColor = new(0.2f, 0.9f, 0.9f);
         private static readonly Color PlayerTwoColor = new(0.95f, 0.3f, 0.7f);
+        // Must match EngagementScreen.NpcHostileTint — same "this is the
+        // hostile NPC" visual identity, just needed here too since round
+        // banners ("Opponent wins initiative!") are built in THIS file,
+        // not that one.
+        private static readonly Color NpcHostileTint = new(0.82f, 0.32f, 0.22f);
         // Deliberately distinct from the yellow-legal/cyan-pending/
         // purple-waypoint highlight language (see HighlightMaterials) —
         // this isn't a movement affordance, so it shouldn't read as one.
@@ -280,16 +285,71 @@ namespace StarBound.Demo
             RefreshView();
 
             // A destroyed player (or, PvP only, a winner who just claimed
-            // the loser's money — see ResolveActiveEngagement) doesn't
-            // necessarily find out immediately — either can land on the
-            // OTHER player while THIS player is holding the device (see
-            // IntegrityPenaltyService) — so it waits here, right as the
-            // device is confirmed to be in THEIR hands for THEIR turn,
-            // same gating OnHandoffConfirmed already relies on for
-            // everything else in this method.
-            var notice = match.CurrentPlayer.ConsumePendingTurnStartNotice();
-            if (!string.IsNullOrEmpty(notice))
-                popupDialog.ShowAlert("Engagement Result", notice);
+            // the loser's money — see ResolveActiveEngagement), and/or a
+            // tier unlock the OTHER player caused on their own turn (see
+            // Match.CompleteGoal — it's match-global, so this player
+            // needs to know too even though they didn't cause it) —
+            // neither necessarily finds out immediately, since either can
+            // land on the OTHER player while THIS player is holding the
+            // device. So it waits here, right as the device is confirmed
+            // to be in THEIR hands for THEIR turn, same gating
+            // OnHandoffConfirmed already relies on for everything else in
+            // this method.
+            ShowPendingNotices(match.CurrentPlayer);
+        }
+
+        // Shows whichever of this player's one-shot notices are pending
+        // (see Player.PendingTurnStartNotice/PendingTierUnlockNotice),
+        // combined into a single alert if more than one is present —
+        // PopupDialog is one reusable instance, not a queue (see
+        // PopupDialog.Show), so two separate ShowAlert calls back to back
+        // would let the second silently overwrite the first before it was
+        // ever seen. These slots can be set independently within the same
+        // turn's two-action budget (e.g. a PvP win as one action, a goal-
+        // completing engagement as the other), so this is the one place
+        // that has to reconcile them for display. immediateNotice/Title
+        // let a caller fold its OWN one-off notice (not stored on Player
+        // at all — see ConfirmPendingMove's hazard-hit notice) into the
+        // same combine, for exactly the same reason: a hazard hit can
+        // coincide with a destruction or a goal completing on the very
+        // same hex. Returns whether anything was actually shown.
+        private bool ShowPendingNotices(Player player, string immediateNotice = null, string immediateNoticeTitle = null)
+        {
+            var notices = new List<(string Title, string Text)>();
+
+            if (!string.IsNullOrEmpty(immediateNotice))
+                notices.Add((immediateNoticeTitle ?? "Notice", immediateNotice));
+
+            var engagementNotice = player.ConsumePendingTurnStartNotice();
+            if (!string.IsNullOrEmpty(engagementNotice))
+                notices.Add(("Engagement Result", engagementNotice));
+
+            var tierNotice = player.ConsumePendingTierUnlockNotice();
+            if (!string.IsNullOrEmpty(tierNotice))
+                notices.Add(("Tier Unlocked", tierNotice));
+
+            var eventNotice = player.ConsumePendingVariableEventNotice();
+            if (!string.IsNullOrEmpty(eventNotice))
+                notices.Add(("New Event", eventNotice));
+
+            var goalNotice = player.ConsumePendingGoalNotice();
+            if (!string.IsNullOrEmpty(goalNotice))
+                notices.Add(("New Goal", goalNotice));
+
+            if (notices.Count == 0)
+                return false;
+
+            // PopupDialog is one reusable instance, not a queue (see
+            // PopupDialog.Show) — two+ separate ShowAlert calls back to
+            // back would let the last one silently overwrite the rest
+            // before any were seen, so multiple pending notices combine
+            // into one alert instead of firing individually.
+            if (notices.Count == 1)
+                popupDialog.ShowAlert(notices[0].Title, notices[0].Text);
+            else
+                popupDialog.ShowAlert("Match Update", string.Join("\n\n", notices.Select(n => n.Text)));
+
+            return true;
         }
 
         // Fired by MapCameraController once per completed tap (press +
@@ -375,14 +435,30 @@ namespace StarBound.Demo
                     lines.Add("Empty space. Nothing here.");
                     break;
                 case TerrainType.Asteroids:
-                    lines.Add($"{DescribeOdds(HazardChances.AsteroidDamageChance)} chance of hull damage on arrival.");
+                    var asteroidChance = match.ActiveVariable switch
+                    {
+                        MatchVariable.CalmSpace => HazardChances.CalmSpaceHazardChance,
+                        MatchVariable.AsteroidStorm => HazardChances.AsteroidDamageChanceDuringStorm,
+                        _ => HazardChances.AsteroidDamageChance
+                    };
+                    lines.Add($"{DescribeOdds(asteroidChance)} chance of hull damage on arrival.");
+                    if (match.ActiveVariable == MatchVariable.AsteroidStorm)
+                        lines.Add("An Asteroid Storm is currently raising the odds.");
+                    else if (match.ActiveVariable == MatchVariable.CalmSpace)
+                        lines.Add("Calm Space is currently lowering the odds.");
                     break;
                 case TerrainType.Mines:
-                    var minefieldAlertActive = match.ActiveVariable == MatchVariable.MinefieldDamage;
-                    var mineChance = minefieldAlertActive ? HazardChances.MinefieldDamageChanceDuringAlert : HazardChances.MinefieldDamageChance;
+                    var mineChance = match.ActiveVariable switch
+                    {
+                        MatchVariable.CalmSpace => HazardChances.CalmSpaceHazardChance,
+                        MatchVariable.MinefieldDamage => HazardChances.MinefieldDamageChanceDuringAlert,
+                        _ => HazardChances.MinefieldDamageChance
+                    };
                     lines.Add($"{DescribeOdds(mineChance)} chance of hull damage on arrival.");
-                    if (minefieldAlertActive)
+                    if (match.ActiveVariable == MatchVariable.MinefieldDamage)
                         lines.Add("A Minefield Alert is currently raising the odds.");
+                    else if (match.ActiveVariable == MatchVariable.CalmSpace)
+                        lines.Add("Calm Space is currently lowering the odds.");
                     break;
                 case TerrainType.Debris:
                     // Not considered hazardous — see [Design] What is
@@ -393,7 +469,18 @@ namespace StarBound.Demo
                     lines.Add("Requires a Wormhole Device to travel through.");
                     break;
                 case TerrainType.Tradelane:
-                    lines.Add($"Costs {TollPricing.TradelaneTollPerHex} gold per hex to travel along.");
+                    switch (match.ActiveVariable)
+                    {
+                        case MatchVariable.TradeBoom:
+                            lines.Add("Tolls are currently waived (Trade Boom).");
+                            break;
+                        case MatchVariable.FuelShortage:
+                            lines.Add($"Costs {TollPricing.TradelaneTollPerHex * TollPricing.FuelShortageTollMultiplier} gold per hex to travel along (Fuel Shortage).");
+                            break;
+                        default:
+                            lines.Add($"Costs {TollPricing.TradelaneTollPerHex} gold per hex to travel along.");
+                            break;
+                    }
                     break;
                 case TerrainType.PlanetOrStarport:
                     lines.Add(hex.IsStarport
@@ -405,6 +492,36 @@ namespace StarBound.Demo
             var visibleTier = EngagementVisibility.GetVisibleTier(hex, match.CurrentPlayer.DiscoveredEngagementHexes);
             if (visibleTier != EngagementTier.None)
                 lines.Add($"An engagement is present here (Tier: {visibleTier}).");
+
+            // Neither of these is otherwise visible from the info popup —
+            // only the map marker itself hinted at it (see
+            // HexMarkerOverride), and a hex that's doing double duty (e.g.
+            // a DefeatNamedTarget goal's target later also offered as a
+            // Bounty job — see MatchProgressionService/JobOfferGenerator,
+            // neither excludes the other's hexes from its own candidate
+            // pool) only ever shows ONE marker, so this text is the only
+            // place a player can actually confirm the overlap.
+            if (match.ActiveGoal is { } activeGoal && activeGoal.TargetHex == hex.Coordinate)
+                lines.Add("This is the race goal's target.");
+
+            if (match.CurrentPlayer.ActiveJob is { } activeJob)
+            {
+                // Mining is two-stage (see MatchHud.RefreshView's own
+                // waypoint logic) — ANY Asteroids hex fulfills it before
+                // cargo is mined, only the specific Destination matters
+                // (as a delivery point) afterward.
+                if (activeJob.Type == JobType.Mining && !match.CurrentPlayer.HasMinedCargo)
+                {
+                    if (hex.Terrain == TerrainType.Asteroids)
+                        lines.Add("You can mine your active job's cargo here.");
+                }
+                else if (activeJob.Destination == hex.Coordinate)
+                {
+                    lines.Add(activeJob.Type == JobType.Mining
+                        ? "This is your active job's delivery destination."
+                        : "This is your active job's destination.");
+                }
+            }
 
             // "Your" ship, not the current player's name — this is a
             // pass-and-play game, so whoever is looking at the screen
@@ -446,30 +563,40 @@ namespace StarBound.Demo
                 if (arrivedHex != null && arrivedHex.Terrain == TerrainType.Wormhole)
                     showWormholeDestinations = true;
 
+                // User-requested: arriving somewhere that makes the
+                // active job's Mine/Deliver button newly relevant should
+                // re-expand the panel, not leave it collapsed from the
+                // roll that made this move possible in the first place
+                // (see MatchHudChrome.Expand's own comment) — otherwise
+                // the button exists but the player has no way to see it
+                // appeared without a manual tap on the chevron.
+                if (match.CanMineAsteroid || match.CanDeliverJob)
+                    chrome.Expand();
+
                 // Hazard damage (see Match.ApplyHazardDamageIfUnlucky)
-                // used to be taken completely silently — the chance is
-                // real (1 in 10 for Asteroids, 1 in 5/2 for Mines), but
-                // with no toast and lastMessage always cleared here,
-                // there was never any way to tell it had actually
-                // happened short of noticing the Hull bar move.
-                lastMessage = result.HazardHit && arrivedHex != null
+                // used to be taken completely silently, then (an earlier
+                // fix this session) a passive header-text toast — still
+                // user-reported as not obvious enough. Now a proper modal
+                // alert, folded into the SAME ShowPendingNotices combine
+                // as destruction/tier/event/goal notices (passed in as an
+                // extra immediate entry) rather than its own separate
+                // ShowAlert call — PopupDialog is one reusable instance,
+                // not a queue, and a hazard hit can coincide with a
+                // destruction (Hull depleted outright, see
+                // IntegrityPenaltyService) or a TravelAndPay goal
+                // completing on the very same hex (no terrain filter on
+                // goal targets) — all of which now surface together in
+                // one alert instead of racing to overwrite each other.
+                // Firing immediately here (rather than deferring, or
+                // caching for a later frame) also means it can't get lost
+                // mid-chain the way the old passive toast could, when a
+                // move chains through several dice or an unrelated
+                // Attack/Shop/Trade follows later in the same turn.
+                var hazardNotice = result.HazardHit && arrivedHex != null
                     ? $"Damaged by the {DescribeTerrainName(arrivedHex.Terrain)}! (-1 Hull)"
                     : null;
-
-                // A hazard hit can deplete Hull outright (see
-                // IntegrityPenaltyService) — same "show it now, not on
-                // some future handoff" treatment OnEngagementContinueClicked
-                // already gives a combat destruction, since CurrentPlayer
-                // is the one holding the device this instant. Supersedes
-                // the plain hazard toast above — Hull's already been
-                // reset by the time this fires, so "-1 Hull" would read
-                // as stale next to "ship destroyed."
-                var pendingNotice = match.CurrentPlayer.ConsumePendingTurnStartNotice();
-                if (!string.IsNullOrEmpty(pendingNotice))
-                {
-                    lastMessage = null;
-                    popupDialog.ShowAlert("Engagement Result", pendingNotice);
-                }
+                lastMessage = null;
+                ShowPendingNotices(match.CurrentPlayer, hazardNotice, "Hazard Hit");
             }
             else
             {
@@ -533,6 +660,16 @@ namespace StarBound.Demo
         {
             match.AttackOpponent();
             lastMessage = null;
+            // A die could already be selected (its legal-target hexes
+            // lit up on the map) from a move the player chose not to
+            // commit before attacking instead — ConfirmPendingMove
+            // already clears this on a successful MOVE, but Attack is a
+            // separate action that bypasses that path entirely, and
+            // nothing else was clearing it or refreshing the map, so the
+            // stale highlight stayed lit through combat and beyond
+            // (user-reported "rogue" hex stuck on the board).
+            selectedDie = null;
+            RefreshView();
         }
 
         // Engagement round-by-round handlers — each mutates domain state,
@@ -568,7 +705,7 @@ namespace StarBound.Demo
                 var labels = GetCombatLogLabels(session);
                 var (playerColor, _) = GetEngagementAccentColors(session);
                 lastRollDetail = DescribeEscape(result, escapeeIsPlayer: true);
-                lastRoundBanner = DescribeEscapeBanner(result, labels.PlayerLabel, escapeeIsPlayer: true, playerColor);
+                lastRoundBanner = DescribeEscapeBanner(result, labels.PlayerLabel, labels.PlayerPossessive, escapeeIsPlayer: true, playerColor);
                 RefreshEngagementScreen();
                 return;
             }
@@ -591,13 +728,14 @@ namespace StarBound.Demo
             var escapee = session.PendingEscapee!.Value;
             var labels = GetCombatLogLabels(session);
             var escapeeLabel = escapee == RoundAttacker.Player ? labels.PlayerLabel : labels.OpponentLabel;
+            var escapeePossessive = escapee == RoundAttacker.Player ? labels.PlayerPossessive : labels.OpponentPossessive;
             var otherLabel = escapee == RoundAttacker.Player ? labels.OpponentLabel : labels.PlayerLabel;
             var (playerColor, opponentColor) = GetEngagementAccentColors(session);
             var escapeeColor = escapee == RoundAttacker.Player ? playerColor : opponentColor;
 
             var result = session.ResolveEscapeIntercept(rng);
             lastRollDetail = DescribeEscape(result, escapeeIsPlayer: escapee == RoundAttacker.Player);
-            lastRoundBanner = DescribeEscapeBanner(result, escapeeLabel, escapee == RoundAttacker.Player, escapeeColor);
+            lastRoundBanner = DescribeEscapeBanner(result, escapeeLabel, escapeePossessive, escapee == RoundAttacker.Player, escapeeColor);
             RefreshEngagementScreen();
         }
 
@@ -702,6 +840,19 @@ namespace StarBound.Demo
 
             match.ResolveActiveEngagement(rng);
 
+            // The engagement that just ended was very likely triggered by
+            // a move onto a marked hex with a die still selected (see
+            // HandleArrival) — the highlight render (ComputeLegalTargets,
+            // see RefreshView) keys off selectedDie alone, with no check
+            // that the die is still unspent/relevant, so leaving it set
+            // here re-lights that die's legal-target hexes on the map the
+            // moment this screen closes. Same stale-highlight bug already
+            // fixed for the explicit Attack button (see OnAttackClicked's
+            // own comment) — this is the other path into it (user-
+            // reported "rogue" hex still happening after a win).
+            selectedDie = null;
+            pendingTarget = null;
+
             lastMessage = outcome switch
             {
                 EngagementOutcome.PlayerEscaped => match.CurrentPlayer.Position != previousPosition
@@ -728,9 +879,11 @@ namespace StarBound.Demo
             // OWN next-turn handoff finally rolls around. OtherPlayer's
             // own notice (if any, PvP only) is untouched — still
             // correctly deferred to their own future handoff.
-            var pendingNotice = match.CurrentPlayer.ConsumePendingTurnStartNotice();
-            if (!string.IsNullOrEmpty(pendingNotice))
-                popupDialog.ShowAlert("Engagement Result", pendingNotice);
+            // Also covers a DefeatNamedTarget goal completing right here
+            // (see Match.HandleProgressionOnEngagementWin/CompleteGoal) —
+            // ShowPendingNotices (below) reconciles both slots into one
+            // alert since PopupDialog can't show two in a row.
+            ShowPendingNotices(match.CurrentPlayer);
 
             RefreshView();
         }
@@ -819,6 +972,9 @@ namespace StarBound.Demo
             // reads whatever's currently there, it doesn't reroll it.
             if (showShop)
                 shopOffer = match.GetShopOffer(rng);
+            // Same reasoning as OnShopCloseClicked — this is a second,
+            // separate path that can also close Shop.
+            RefreshView();
         }
 
         // Shop's own action handlers — each mutates domain state, sets
@@ -827,6 +983,16 @@ namespace StarBound.Demo
         // ShopScreen's own Detail card already IS the confirmation step
         // (see the story's "select -> show info -> confirm" workflow),
         // so a second native dialog on top would be redundant.
+        // Each of these spends an action (see Match.ConsumeActionForSession)
+        // on top of mutating Shop-specific state, so RefreshShopScreen
+        // alone isn't enough — RefreshView is what actually recomputes
+        // and pushes match.CanMove/ActionsRemaining to chrome's dice
+        // tray. Without it, the tray kept showing its pre-action,
+        // already-stale snapshot (dice drawn interactable) until some
+        // LATER, unrelated click finally forced a RefreshView — e.g.
+        // repairing Hull with unused movement dice still showing, only
+        // to have the very next die tap immediately flip to "No actions
+        // left to move with this turn" (user-reported).
         private void OnShopBuyClicked(ItemDefinition item)
         {
             var result = match.BuyItem(item);
@@ -839,6 +1005,7 @@ namespace StarBound.Demo
                 shopOffer = match.GetShopOffer(rng);
             shopStatusMessage = result.Success ? $"Bought {item.Name}." : $"Purchase failed — {Describe(result.FailureReason)}.";
             RefreshShopScreen();
+            RefreshView();
         }
 
         private void OnShopRepairHullClicked()
@@ -846,6 +1013,7 @@ namespace StarBound.Demo
             var result = match.RepairStat(CoreStat.Hull);
             shopStatusMessage = result.Success ? "Hull repaired." : $"Repair failed — {Describe(result.FailureReason)}.";
             RefreshShopScreen();
+            RefreshView();
         }
 
         private void OnShopRepairEnergyClicked()
@@ -853,6 +1021,7 @@ namespace StarBound.Demo
             var result = match.RepairStat(CoreStat.Energy);
             shopStatusMessage = result.Success ? "Energy repaired." : $"Repair failed — {Describe(result.FailureReason)}.";
             RefreshShopScreen();
+            RefreshView();
         }
 
         private void OnShopUseItemClicked(ItemDefinition item)
@@ -860,6 +1029,7 @@ namespace StarBound.Demo
             match.UseItem(item);
             shopStatusMessage = $"Used {item.Name}.";
             RefreshShopScreen();
+            RefreshView();
         }
 
         private void OnShopSellItemClicked(ItemDefinition item)
@@ -867,6 +1037,7 @@ namespace StarBound.Demo
             var result = match.SellItem(item);
             shopStatusMessage = result.Success ? $"Sold {item.Name} for ${result.Refund}." : $"Sell failed — {Describe(result.FailureReason)}.";
             RefreshShopScreen();
+            RefreshView();
         }
 
         private void OnShopTradeItemClicked(ItemDefinition item)
@@ -874,9 +1045,19 @@ namespace StarBound.Demo
             match.TradeItemToOpponent(item);
             shopStatusMessage = $"Traded {item.Name} to {match.OtherPlayer.DisplayName}.";
             RefreshShopScreen();
+            RefreshView();
         }
 
-        private void OnShopCloseClicked() => showShop = false;
+        // Defensive, not strictly load-bearing now that every action
+        // above refreshes itself — but Close is a distinct path from
+        // those (no action of its own), so this keeps the dice tray
+        // honest even if Shop is opened and closed without buying/
+        // repairing/etc.
+        private void OnShopCloseClicked()
+        {
+            showShop = false;
+            RefreshView();
+        }
 
         // Fired by WormholeScreen as the Detail-card selection changes —
         // mirrors OnJobBoardSelectionChanged exactly: re-renders locally,
@@ -1129,7 +1310,7 @@ namespace StarBound.Demo
             shopScreen.Refresh(
                 HexDisplayName(match.CurrentPlayer.Position), playerColor, ship.Money,
                 buyableItems,
-                ship.GetStat(CoreStat.Hull), ship.GetStat(CoreStat.Energy), Ship.DefaultStatValue, RepairService.CostPerPoint,
+                ship.GetStat(CoreStat.Hull), ship.GetStat(CoreStat.Energy), Ship.DefaultStatValue, Ship.MaxEnergyValue, RepairService.CostPerPoint,
                 ship.HeldItems, ship.CargoCapacity, match.OtherPlayer.DisplayName,
                 shopStatusMessage,
                 OnShopBuyClicked, OnShopRepairHullClicked, OnShopRepairEnergyClicked,
@@ -1186,6 +1367,7 @@ namespace StarBound.Demo
             MoveFailureReason.TargetNotAdjacent => "that hex isn't adjacent",
             MoveFailureReason.TargetTerrainMismatch => "that die doesn't match the terrain there",
             MoveFailureReason.DieAlreadySpent => "that die's already been used",
+            MoveFailureReason.NotEnoughEnergy => "not enough Energy left to use that die",
             _ => reason.ToString()
         };
 
@@ -1196,7 +1378,10 @@ namespace StarBound.Demo
             // the Shop offer above.
             if (showJobBoard && !jobOfferRolledThisTurn)
             {
-                jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map, match.MaxUnlockedTier);
+                var rewardMultiplier = match.ActiveVariable == MatchVariable.BountySeason
+                    ? JobOfferGenerator.BountySeasonRewardMultiplier
+                    : 1.0;
+                jobOffer = JobOfferGenerator.GenerateOffer(rng, match.CurrentPlayer.Position, match.Map, match.MaxUnlockedTier, rewardMultiplier);
                 jobOfferRolledThisTurn = true;
             }
 
@@ -1577,7 +1762,7 @@ namespace StarBound.Demo
             chrome.SetProgression(
                 $"Phase: {match.MaxUnlockedTier} unlocked",
                 match.ActiveVariable != MatchVariable.None ? $"Event: {DescribeVariable(match.ActiveVariable)}" : null,
-                match.ActiveGoal is { } goal ? $"Race goal: {DescribeGoal(goal)}" : null);
+                match.ActiveGoal is { } goal ? $"Race goal: {DescribeGoal(match.Map, goal)}" : null);
 
             chrome.SetAttack(match.CanAttackOpponent, $"Attack {match.OtherPlayer.DisplayName}");
             // Same base gate as Attack (IsOnOpponentHex + budget) — see
@@ -1612,21 +1797,13 @@ namespace StarBound.Demo
         // Still used by DescribeVariable/DescribeGoal's callers — see
         // Update(), which builds the same progression text for the UGUI
         // chrome now instead of this method's old IMGUI labels.
-        private static string DescribeVariable(MatchVariable variable) => variable switch
-        {
-            MatchVariable.MinefieldDamage => "Minefield Damage — entering a Mines hex costs 1 Hull.",
-            MatchVariable.TradeBoom => "Trade Boom — Tradelane tolls are waived.",
-            _ => variable.ToString()
-        };
+        // Delegates to the shared description (see MatchVariableDescriptions)
+        // so the persistent status label and the one-time "New Event"
+        // notice (Match.HandleProgressionOnEngagementWin) never drift out
+        // of sync with each other.
+        private static string DescribeVariable(MatchVariable variable) => MatchVariableDescriptions.Describe(variable);
 
-        private static string DescribeGoal(MatchGoal goal) => goal.Type switch
-        {
-            MatchGoalType.TravelAndPay =>
-                $"Travel & Pay — reach ({goal.TargetHex.Q}, {goal.TargetHex.R}) with at least ${goal.MoneyRequired} (reward ${goal.RewardMoney}).",
-            MatchGoalType.DefeatNamedTarget =>
-                $"Defeat the marked target at ({goal.TargetHex.Q}, {goal.TargetHex.R}) (reward ${goal.RewardMoney}).",
-            _ => goal.Type.ToString()
-        };
+        private static string DescribeGoal(GameMap map, MatchGoal goal) => MatchGoalDescriptions.Describe(map, goal);
 
         // "you"/"opponent" reads fine for an NPC fight (only one real,
         // controllable party) but is actively misleading in PvP the
@@ -1658,14 +1835,19 @@ namespace StarBound.Demo
         // instead. PvP ties each side to that player's own established
         // identity color (PlayerOneColor/PlayerTwoColor, by IDENTITY,
         // not current/other — those flip every turn, but each real
-        // player keeps the same color all match); PvE has no second
-        // real player to distinguish, so both sides share the neutral
-        // default.
+        // player keeps the same color all match); PvE has no second real
+        // player to distinguish by IDENTITY, but the opponent is still a
+        // hostile NPC, not a second instance of the player — user-
+        // reported that "Opponent wins initiative!" read in the same
+        // neutral color as the player's own banners, same underlying gap
+        // EngagementScreen.opponentShipColor already fixed for the name
+        // label/portrait on that screen; this is the matching fix for
+        // round-banner text built here instead.
         private (Color Player, Color Opponent) GetEngagementAccentColors(EngagementSession session) =>
             session.IsPvP
                 ? (match.CurrentPlayer == match.PlayerOne ? PlayerOneColor : PlayerTwoColor,
                    match.OtherPlayer == match.PlayerOne ? PlayerOneColor : PlayerTwoColor)
-                : (ScreenChromeKit.AccentColor, ScreenChromeKit.AccentColor);
+                : (ScreenChromeKit.AccentColor, NpcHostileTint);
 
         // "you" is second person (needs the bare verb — "you win"), but
         // every other label this session ever produces ("opponent", or a
@@ -1778,10 +1960,15 @@ namespace StarBound.Demo
                 ? ($"{playerLabel} {Conjugate(playerLabel, "win", "wins")} initiative!", playerColor, RoundBannerKind.Initiative, true)
                 : ($"{opponentLabel} {Conjugate(opponentLabel, "win", "wins")} initiative!", opponentColor, RoundBannerKind.Initiative, false);
 
-        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeEscapeBanner(EscapeAttemptResult result, string selfLabel, bool escapeeIsPlayer, Color selfColor) =>
+        // selfPossessive, not selfLabel + "'s" — "you" is already a
+        // pronoun, so appending 's produced the literal, ungrammatical
+        // "you's escape failed!" instead of "your escape failed!". See
+        // GetCombatLogLabels, which already computes the correct
+        // possessive for both PvE ("your") and PvP ("{name}'s").
+        private static (string Text, Color Color, RoundBannerKind Kind, bool DefenderIsPlayer) DescribeEscapeBanner(EscapeAttemptResult result, string selfLabel, string selfPossessive, bool escapeeIsPlayer, Color selfColor) =>
             result.Success
                 ? ($"{selfLabel} escaped!", selfColor, RoundBannerKind.EscapeSuccess, escapeeIsPlayer)
-                : ($"{selfLabel}'s escape failed!", selfColor, RoundBannerKind.EscapeFailed, escapeeIsPlayer);
+                : ($"{selfPossessive} escape failed!", selfColor, RoundBannerKind.EscapeFailed, escapeeIsPlayer);
 
         private void CreateShipMarkers()
         {
@@ -1991,10 +2178,8 @@ namespace StarBound.Demo
             if (selectedWormholeDestination.HasValue)
                 waypoints.Add(selectedWormholeDestination.Value);
 
-            if (match.ActiveGoal is { } goal)
-                highlighted.Add(goal.TargetHex);
-
-            mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes, pendingTarget, waypoints);
+            mapView.Render(match.Map, hexRadius, highlighted, match.CurrentPlayer.DiscoveredEngagementHexes, pendingTarget, waypoints,
+                match.ActiveGoal?.TargetHex);
             UpdateShipMarkers();
 
             // The one relatively expensive chrome refresh (Destroy/
@@ -2016,7 +2201,9 @@ namespace StarBound.Demo
                 selectedDie,
                 match.CurrentHand != null,
                 match.CanRollDice,
+                match.CurrentPlayer.Ship.GetStat(CoreStat.Energy) > 0,
                 match.CanMove,
+                match.CurrentPlayer.Ship.GetStat(CoreStat.Energy),
                 justRolled,
                 pendingTarget.HasValue ? "Confirm this move?" : null,
                 OnRollDiceClicked,
@@ -2041,13 +2228,19 @@ namespace StarBound.Demo
             return results;
         }
 
-        // Falls back to the raw coordinate when the hex has no Name —
-        // correct, not just defensive, for Bounty Hunting jobs, whose
-        // Destination is the marked engagement hex and often isn't a
-        // planet at all.
+        // Falls back to HexNavigationDescriptions (a generated flavor name
+        // plus a landmark-relative bearing) when the hex has no Name of
+        // its own — correct, not just defensive, for Bounty Hunting jobs,
+        // whose Destination is the marked engagement hex and often isn't
+        // a planet at all. User-reported: raw (Q, R) coordinates are
+        // meaningless to a player — this is the one choke-point nearly
+        // every piece of hex-referencing UI text already routes through
+        // (job board, wormhole picker, escape-carried-to text, goal
+        // announcements via MatchGoalDescriptions), so fixing it here
+        // fixes all of them at once.
         private string HexDisplayName(HexCoordinate coordinate) =>
             match.Map.TryGetHex(coordinate, out var hex) && !string.IsNullOrEmpty(hex.Name)
                 ? hex.Name
-                : coordinate.ToString();
+                : HexNavigationDescriptions.Describe(match.Map, coordinate);
     }
 }

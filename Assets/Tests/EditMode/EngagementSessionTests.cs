@@ -79,6 +79,11 @@ namespace StarBound.Tests
 
             Assert.AreEqual(EngagementOutcome.PlayerWon, session.Outcome);
             Assert.AreEqual(1, player.HardEngagementWins);
+            // User-reported: a plain kill paid out with no confirmation
+            // of what was awarded. LastKillRewardMoney is what the UI
+            // reads to build that confirmation (see EngagementScreen.
+            // DescribeOutcome) — tier-scaled, see DefeatRewardMoney.
+            Assert.AreEqual(60, session.LastKillRewardMoney);
         }
 
         [Test]
@@ -103,6 +108,7 @@ namespace StarBound.Tests
             Assert.AreEqual(EngagementOutcome.PlayerWon, session.Outcome);
             Assert.AreEqual(0, player.HardEngagementWins);
             Assert.IsFalse(player.HasWonMatch);
+            Assert.IsNull(session.LastKillRewardMoney, "PvP wins don't pay the plain-kill reward — see ApplyAttackOutcome's own IsPvP gate.");
         }
 
         [Test]
@@ -178,15 +184,19 @@ namespace StarBound.Tests
 
             Assert.IsFalse(result.Success);
             Assert.AreEqual(EngagementOutcome.InProgress, session.Outcome);
-            Assert.AreEqual(2, player.Ship.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue - 1, player.Ship.GetStat(CoreStat.Energy));
         }
 
         [Test]
-        public void AttemptEscape_FailureDepletesLastEnergy_PlayerLoses()
+        public void AttemptEscape_FailureAtZeroEnergy_NoLongerEndsTheEngagement()
         {
+            // Energy is a movement-die economy now, not a second
+            // destruction condition — see Ship.IsIntegrityDepleted's own
+            // comment. A failed escape at 0 Energy still just costs
+            // nothing further (floored at 0) and the round continues.
             var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
             var player = CreatePlayer();
-            player.Ship.ApplyStatDelta(CoreStat.Energy, -2); // Energy = 1, one failed attempt from depleted
+            player.Ship.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue); // Energy = 0
             var opponent = new Ship(cargoCapacity: 0);
             opponent.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape failure
 
@@ -195,7 +205,7 @@ namespace StarBound.Tests
 
             Assert.IsFalse(result.Success);
             Assert.AreEqual(0, player.Ship.GetStat(CoreStat.Energy));
-            Assert.AreEqual(EngagementOutcome.PlayerLost, session.Outcome);
+            Assert.AreEqual(EngagementOutcome.InProgress, session.Outcome);
         }
 
         [Test]
@@ -346,20 +356,44 @@ namespace StarBound.Tests
 
             Assert.IsFalse(result.Success);
             Assert.AreEqual(EngagementOutcome.InProgress, session.Outcome);
-            Assert.AreEqual(2, opponentShip.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue - 1, opponentShip.GetStat(CoreStat.Energy));
+            // Regression coverage: a failed flee used to silently discard
+            // the attacker's already-won initiative (clearing
+            // PendingAttacker unconditionally), forcing a fresh initiative
+            // roll next instead of letting the attack actually happen —
+            // see ApplyEscapeOutcome's own comment.
+            Assert.AreEqual(RoundAttacker.Player, session.PendingAttacker);
+            Assert.IsTrue(session.IsAwaitingAttackExecution);
+            Assert.AreEqual(RoundAttacker.Player, session.ActiveDecisionMaker, "The UI's own source of truth for whose turn it is.");
         }
 
         [Test]
-        public void AttemptOpponentEscape_FailureDepletesLastEnergy_PlayerWins()
+        public void AttemptOpponentEscape_Failure_AttackerCanStillExecuteTheAlreadyWonInitiative()
+        {
+            var session = CreatePvPSessionWithOpponentDefending(out _);
+
+            session.AttemptOpponentEscape(new Random(1)); // guaranteed to fail — see the test above
+
+            // The fix: the attack that was already decided by initiative
+            // still goes through, same as if the opponent had declared
+            // Hold instead of attempting to flee.
+            var result = session.ExecuteAttack(new Random(1));
+
+            Assert.AreEqual(RoundAttacker.Player, result.Attacker);
+            Assert.IsNull(session.PendingAttacker);
+        }
+
+        [Test]
+        public void AttemptOpponentEscape_FailureAtZeroEnergy_NoLongerEndsTheEngagement()
         {
             var session = CreatePvPSessionWithOpponentDefending(out var opponentShip);
-            opponentShip.ApplyStatDelta(CoreStat.Energy, -2); // Energy = 1, one failed attempt from depleted
+            opponentShip.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue); // Energy = 0
 
             var result = session.AttemptOpponentEscape(new Random(1));
 
             Assert.IsFalse(result.Success);
             Assert.AreEqual(0, opponentShip.GetStat(CoreStat.Energy));
-            Assert.AreEqual(EngagementOutcome.PlayerWon, session.Outcome);
+            Assert.AreEqual(EngagementOutcome.InProgress, session.Outcome);
         }
 
         // Initiative no longer has a PvP-only split path — it's pure
@@ -547,6 +581,22 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void BeginEscapeAttempt_ChargesEnergyImmediately_BeforeResolveEscapeIntercept()
+        {
+            // User-reported: the Energy cost should be visible the
+            // instant the attempt is made, not only once the other
+            // side's own intercept tap finally resolves it.
+            var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
+            var player = CreatePlayer();
+            var opponent = new Ship(cargoCapacity: 0);
+            var session = new EngagementSession(definition, player, opponent, isPvP: true);
+
+            session.BeginEscapeAttempt(new Random(1));
+
+            Assert.AreEqual(Ship.MaxEnergyValue - CombatResolver.EscapeAttemptEnergyCost, player.Ship.GetStat(CoreStat.Energy));
+        }
+
+        [Test]
         public void BeginEscapeAttempt_WhenCanAttemptEscapeIsFalse_Throws()
         {
             var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
@@ -616,15 +666,15 @@ namespace StarBound.Tests
 
             Assert.IsFalse(result.Success);
             Assert.AreEqual(EngagementOutcome.InProgress, session.Outcome);
-            Assert.AreEqual(2, player.Ship.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue - 1, player.Ship.GetStat(CoreStat.Energy));
         }
 
         [Test]
-        public void BeginEscapeAttemptThenResolveEscapeIntercept_FailureDepletesLastEnergy_PlayerLoses()
+        public void BeginEscapeAttemptThenResolveEscapeIntercept_FailureAtZeroEnergy_NoLongerEndsTheEngagement()
         {
             var definition = EngagementDefinitionTable.For(EngagementTier.Easy);
             var player = CreatePlayer();
-            player.Ship.ApplyStatDelta(CoreStat.Energy, -2); // Energy = 1, one failed attempt from depleted
+            player.Ship.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue); // Energy = 0
             var opponent = new Ship(cargoCapacity: 0);
             opponent.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed escape failure
             var session = new EngagementSession(definition, player, opponent, isPvP: true);
@@ -634,7 +684,7 @@ namespace StarBound.Tests
 
             Assert.IsFalse(result.Success);
             Assert.AreEqual(0, player.Ship.GetStat(CoreStat.Energy));
-            Assert.AreEqual(EngagementOutcome.PlayerLost, session.Outcome);
+            Assert.AreEqual(EngagementOutcome.InProgress, session.Outcome);
         }
 
         [Test]
@@ -647,6 +697,16 @@ namespace StarBound.Tests
             Assert.IsTrue(session.IsAwaitingEscapeIntercept);
             Assert.AreEqual(RoundAttacker.Opponent, session.PendingEscapee);
             Assert.IsFalse(session.CanOpponentDecideDefense); // consumed, same as AttemptOpponentEscape
+        }
+
+        [Test]
+        public void BeginOpponentEscapeAttempt_ChargesEnergyImmediately_BeforeResolveEscapeIntercept()
+        {
+            var session = CreatePvPSessionWithOpponentDefending(out var opponentShip);
+
+            session.BeginOpponentEscapeAttempt(new Random(1));
+
+            Assert.AreEqual(Ship.MaxEnergyValue - CombatResolver.EscapeAttemptEnergyCost, opponentShip.GetStat(CoreStat.Energy));
         }
 
         [Test]
@@ -674,6 +734,30 @@ namespace StarBound.Tests
 
             Assert.IsTrue(result.Success);
             Assert.AreEqual(EngagementOutcome.OpponentEscaped, session.Outcome);
+        }
+
+        // Mirrors AttemptOpponentEscape_Failure_EnergyLostAndRoundContinues's
+        // own regression coverage, but via the split PvP path — this one
+        // used to be worse than the combined method: BeginOpponentEscapeAttempt
+        // cleared PendingAttacker immediately, even before the roll.
+        [Test]
+        public void BeginOpponentEscapeAttemptThenResolveEscapeIntercept_Failure_AttackerCanStillExecuteTheAlreadyWonInitiative()
+        {
+            var session = CreatePvPSessionWithOpponentDefending(out _);
+            // Player's Speed is already +20 (see CreatePvPSessionWithOpponentDefending),
+            // so the opponent's escape attempt is guaranteed to fail.
+
+            session.BeginOpponentEscapeAttempt(new Random(1));
+            var escapeResult = session.ResolveEscapeIntercept(new Random(1));
+
+            Assert.IsFalse(escapeResult.Success);
+            Assert.AreEqual(EngagementOutcome.InProgress, session.Outcome);
+            Assert.AreEqual(RoundAttacker.Player, session.PendingAttacker);
+            Assert.IsTrue(session.IsAwaitingAttackExecution);
+
+            var attackResult = session.ExecuteAttack(new Random(1));
+
+            Assert.AreEqual(RoundAttacker.Player, attackResult.Attacker);
         }
 
         // The split path (Begin then ResolveEscapeIntercept) must consume

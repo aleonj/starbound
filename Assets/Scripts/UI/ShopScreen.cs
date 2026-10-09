@@ -86,7 +86,10 @@ namespace StarBound.UI
             public Color PlayerColor;
             public int Money;
             public IReadOnlyList<ItemDefinition> BuyableItems;
-            public int Hull, Energy, MaxIntegrity, RepairCostPerPoint;
+            // Separate maxes, not one shared "MaxIntegrity" — Energy's
+            // ceiling (Ship.MaxEnergyValue) is higher than Hull's (Ship.
+            // DefaultStatValue) since [Combat] Energy overhaul.
+            public int Hull, Energy, MaxHull, MaxEnergy, RepairCostPerPoint;
             public IReadOnlyList<ItemDefinition> HeldItems;
             public int CargoCapacity;
             public string OpponentDisplayName;
@@ -117,7 +120,7 @@ namespace StarBound.UI
         public void Refresh(
             string locationName, Color playerColor, int money,
             IReadOnlyList<ItemDefinition> buyableItems,
-            int hull, int energy, int maxIntegrity, int repairCostPerPoint,
+            int hull, int energy, int maxHull, int maxEnergy, int repairCostPerPoint,
             IReadOnlyList<ItemDefinition> heldItems, int cargoCapacity, string opponentDisplayName,
             string statusMessage,
             Action<ItemDefinition> onBuy, Action onRepairHull, Action onRepairEnergy,
@@ -129,7 +132,7 @@ namespace StarBound.UI
             {
                 LocationName = locationName, PlayerColor = playerColor, Money = money,
                 BuyableItems = buyableItems,
-                Hull = hull, Energy = energy, MaxIntegrity = maxIntegrity, RepairCostPerPoint = repairCostPerPoint,
+                Hull = hull, Energy = energy, MaxHull = maxHull, MaxEnergy = maxEnergy, RepairCostPerPoint = repairCostPerPoint,
                 HeldItems = heldItems, CargoCapacity = cargoCapacity, OpponentDisplayName = opponentDisplayName,
                 StatusMessage = statusMessage,
                 OnBuy = onBuy, OnRepairHull = onRepairHull, OnRepairEnergy = onRepairEnergy,
@@ -186,7 +189,7 @@ namespace StarBound.UI
             var canHoldAnotherItem = data.HeldItems.Count < data.CargoCapacity;
 
             RebuildBuyRow(data.BuyableItems, data.OnBuy);
-            RebuildRepairRow(data.Hull, data.Energy, data.MaxIntegrity, data.RepairCostPerPoint, data.Money, data.OnRepairHull, data.OnRepairEnergy);
+            RebuildRepairRow(data.Hull, data.Energy, data.MaxHull, data.MaxEnergy, data.RepairCostPerPoint, data.Money, data.OnRepairHull, data.OnRepairEnergy);
             RebuildCargoRow(data.HeldItems, data.CargoCapacity);
             RebuildDetail(data.Money, canHoldAnotherItem, data.OpponentDisplayName, data.OnBuy, data.OnUseItem, data.OnSellItem, data.OnTradeItem, data.CanUseItem, data.CanTradeItem);
 
@@ -231,13 +234,13 @@ namespace StarBound.UI
             }
         }
 
-        private void RebuildRepairRow(int hull, int energy, int maxIntegrity, int costPerPoint, int money, Action onRepairHull, Action onRepairEnergy)
+        private void RebuildRepairRow(int hull, int energy, int maxHull, int maxEnergy, int costPerPoint, int money, Action onRepairHull, Action onRepairEnergy)
         {
             for (var i = repairRow.childCount - 1; i >= 0; i--)
                 DestroyImmediate(repairRow.GetChild(i).gameObject);
 
-            CreateRepairButton(repairRow, "Repair Hull", hull, maxIntegrity, costPerPoint, money, onRepairHull);
-            CreateRepairButton(repairRow, "Repair Energy", energy, maxIntegrity, costPerPoint, money, onRepairEnergy);
+            CreateRepairButton(repairRow, "Repair Hull", hull, maxHull, costPerPoint, money, onRepairHull);
+            CreateRepairButton(repairRow, "Repair Energy", energy, maxEnergy, costPerPoint, money, onRepairEnergy);
         }
 
         private static void CreateRepairButton(Transform parent, string label, int current, int max, int costPerPoint, int money, Action onClick)

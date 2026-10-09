@@ -128,7 +128,11 @@ namespace StarBound.Tests
 
             match.ResolveActiveEngagement(new Random(1));
 
-            Assert.AreEqual(200, p1.Ship.Money);
+            // 200 (bounty reward) + 15 (the plain per-kill reward every
+            // Easy-tier PvE win now also pays — see
+            // EngagementSession.DefeatRewardMoney) — separate, additive
+            // rewards, not mutually exclusive.
+            Assert.AreEqual(215, p1.Ship.Money);
             Assert.IsNull(p1.ActiveJob);
             Assert.AreEqual(1, p1.EasyEngagementWins);
             Assert.IsTrue(match.Map.TryGetHex(new HexCoordinate(0, -1), out var hex));

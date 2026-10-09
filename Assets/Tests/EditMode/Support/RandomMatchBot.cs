@@ -130,7 +130,13 @@ namespace StarBound.Tests
 
         private static void PlayOneTurn(Match match, Random rng, MatchSimulationResult result)
         {
-            match.RollDice(rng);
+            // 0 Energy now blocks rolling outright (see [Combat] Energy
+            // overhaul) — CanMove-gated movement options below already
+            // degrade gracefully with no hand, so skipping the roll
+            // here just means this turn's action list is shop/attack/
+            // trade/etc. only, same as the real UI would show.
+            if (match.CanRollDice)
+                match.RollDice(rng);
 
             var attempts = 0;
             while (!match.IsInEngagement && match.ActionsRemaining > 0 && attempts < MaxActionAttemptsPerTurn)
@@ -243,7 +249,7 @@ namespace StarBound.Tests
                 // as a single option among a large random pool — "mildly
                 // strategic", not deterministic.
                 var repairWeight = ship.GetStat(CoreStat.Hull) < Ship.DefaultStatValue ||
-                    ship.GetStat(CoreStat.Energy) < Ship.DefaultStatValue ? 4 : 1;
+                    ship.GetStat(CoreStat.Energy) < Ship.MaxEnergyValue ? 4 : 1;
                 for (var i = 0; i < repairWeight; i++)
                 {
                     actions.Add(() => match.RepairStat(CoreStat.Hull));

@@ -278,6 +278,11 @@ namespace StarBound.UI
         private const float FleeDuration = 0.5f;
         private const float FleeFailPeakFraction = 0.45f;
         private const float FleeDistance = 160f;
+        // Banks the portrait into the direction of travel while it
+        // slides — reads as the ship actually peeling off/turning away,
+        // not just sliding sideways flat. Modest angle: enough to read
+        // as a turn without the sprite looking broken mid-flight.
+        private const float FleeTurnAngle = 28f;
 
         // The winner's pulse for taking initiative — still noticeably
         // quicker than a landed hit's pulse (reads as "readying to act,"
@@ -391,6 +396,21 @@ namespace StarBound.UI
         };
 
         private static Sprite LoadNpcSprite(string name) => Resources.Load<Sprite>($"Ships/NPC/{name}");
+
+        // "marauder_ravager" -> "Marauder Ravager" — the sprite-selection
+        // key doubles as a displayable class name, same resource-key
+        // naming convention this project already uses elsewhere.
+        private static string HumanizeNpcClassName(string key)
+        {
+            var words = key.Split('_');
+            for (var i = 0; i < words.Length; i++)
+            {
+                if (words[i].Length > 0)
+                    words[i] = char.ToUpperInvariant(words[i][0]) + words[i].Substring(1);
+            }
+
+            return string.Join(" ", words);
+        }
 
         private static float GetNpcPortraitScale(EngagementTier tier) => tier switch
         {
@@ -613,6 +633,12 @@ namespace StarBound.UI
         // hostile at all.
         private Sprite npcPortraitSprite;
         private Color npcPortraitColor;
+        // Humanized form of the same sprite-selection key used to load
+        // npcPortraitSprite (e.g. "marauder_ravager" -> "Marauder
+        // Ravager") — picked/cached alongside it, same lifetime. Shown
+        // next to "Opponent" so a PvE fight says WHO you're up against,
+        // not just that it's an NPC.
+        private string npcClassName;
 
         private void Awake()
         {
@@ -654,6 +680,21 @@ namespace StarBound.UI
                 displayedPlayerHull = playerStartingHull;
                 displayedOpponentHull = opponentStartingHull;
                 hullRevealPending = false;
+                actionRowRevealPending = false;
+
+                // SetPanelTextVisible only toggles roundResultText.enabled,
+                // never its actual .text — the real content update for a
+                // round is deliberately deferred into a reveal coroutine
+                // (see RevealRoundOutcome), so without this, a brand-new
+                // session's very first round re-enables this Text
+                // component (hasRoundResult becomes true) well before its
+                // own RevealRoundOutcome call ever fires, exposing
+                // whatever string the PREVIOUS engagement left behind for
+                // that entire reveal animation (e.g. "Player 2 escaped!"
+                // bleeding into a new fight with Player 2). Clearing both
+                // here guarantees nothing stale is left to show.
+                roundResultText.text = string.Empty;
+                lastPulsedRoundResultText = null;
 
                 if (!session.IsPvP)
                 {
@@ -662,6 +703,10 @@ namespace StarBound.UI
                     var realSprite = LoadNpcSprite(chosenName);
                     npcPortraitSprite = realSprite != null ? realSprite : ShipMarkerView.GetHullSprite(NpcPlaceholderHullStyle);
                     npcPortraitColor = realSprite != null ? Color.white : NpcHostileTint;
+                    // Shown regardless of whether real art was found —
+                    // the class name is about who you're fighting, not
+                    // whether unique art exists for them yet.
+                    npcClassName = HumanizeNpcClassName(chosenName);
                 }
             }
 
@@ -743,8 +788,30 @@ namespace StarBound.UI
             }
 
             var opponentView = new OpponentStatView(session.Opponent);
-            opponentNameText.text = session.IsPvP ? opponentDisplayName : "Opponent";
-            opponentNameText.color = opponentAccentColor;
+            // User-reported, twice now: claiming a bounty was "completely
+            // indistinguishable from a normal engagement," and separately,
+            // finding the race goal's marked engagement but "the
+            // engagement screen didn't mention it." This is the one
+            // header both sides of the fight are looking at the whole
+            // time, so it's the right place for a persistent marker
+            // rather than something that only shows up after the fact in
+            // the victory text below. Both can apply to the same hex at
+            // once (see the hex-info popup's own handling of this same
+            // overlap) — combined into one parenthetical rather than
+            // only ever showing one.
+            var tags = new List<string>();
+            if (!session.IsPvP && session.IsBountyTarget)
+                tags.Add("Marked Bounty");
+            if (!session.IsPvP && session.IsGoalTarget)
+                tags.Add("Race Goal");
+            var opponentTag = tags.Count > 0 ? $" ({string.Join(", ", tags)})" : "";
+            opponentNameText.text = session.IsPvP ? opponentDisplayName : $"Opponent — {npcClassName}{opponentTag}";
+            // opponentShipColor, not raw opponentAccentColor — matches
+            // the portrait/ring/icons next to it, which already use
+            // opponentShipColor specifically because opponentAccentColor
+            // resolves to the generic neutral chrome accent for PvE (see
+            // that field's own comment), not anything hostile-themed.
+            opponentNameText.color = opponentShipColor;
             // See displayedOpponentHull's own comment — held at the
             // pre-round value while a Hit/CriticalHit's reveal is
             // pending, caught up to the real session value by
@@ -1673,14 +1740,30 @@ namespace StarBound.UI
         // with no fade — "tried to bolt, got yanked back into the fight."
         private void PlayPortraitFlee(RectTransform portrait, Image sprite, bool isOpponentSide, bool success)
         {
-            SetPortraitCoroutine(isOpponentSide, StartCoroutine(PortraitFleeRoutine(portrait, sprite, isOpponentSide ? -1f : 1f, success)));
+            SetPortraitCoroutine(isOpponentSide, StartCoroutine(PortraitFleeRoutine(portrait, sprite, isOpponentSide ? -1f : 1f, isOpponentSide, success)));
         }
 
-        private IEnumerator PortraitFleeRoutine(RectTransform portrait, Image sprite, float direction, bool success)
+        private IEnumerator PortraitFleeRoutine(RectTransform portrait, Image sprite, float direction, bool isOpponentSide, bool success)
         {
             var restPosition = portrait.anchoredPosition;
+            var restRotation = portrait.localRotation;
             var restColor = sprite.color;
             var elapsed = 0f;
+
+            // Banks AWAY from the rest pose, into the direction of
+            // travel. Pure Z rotations commute, so composing onto
+            // restRotation does NOT automatically correct for a 180°-
+            // faced rest pose (see CreatePortraitBlock) the way
+            // anchoredPosition deltas do — the opponent's nose starts
+            // pointing the opposite screen-way from the player's, so
+            // the SAME sign of turn reads as turning AWAY from travel
+            // for them instead of into it. Flipping the sign for the
+            // opponent side corrects this (verified: without it, the
+            // opponent's nose ends up a full 180° off from the
+            // player's equivalent turn — the exact regression reported
+            // against the top portrait).
+            var turnSign = isOpponentSide ? 1f : -1f;
+            var turnRotation = restRotation * Quaternion.Euler(0f, 0f, turnSign * FleeTurnAngle * direction);
 
             if (success)
             {
@@ -1690,12 +1773,22 @@ namespace StarBound.UI
                     var t = Mathf.Clamp01(elapsed / FleeDuration);
                     var eased = t * t;
                     portrait.anchoredPosition = restPosition + new Vector2(FleeDistance * direction * eased, 0f);
+                    portrait.localRotation = Quaternion.Slerp(restRotation, turnRotation, eased);
                     var color = sprite.color;
                     color.a = Mathf.Lerp(restColor.a, 0f, eased);
                     sprite.color = color;
                     yield return null;
                 }
 
+                // Position/alpha are deliberately left offset/faded (see
+                // this method's own comment — both get unconditionally
+                // overwritten by the next Refresh regardless, position
+                // via layout recalculation and color via the per-Refresh
+                // sprite/tint assignment). Rotation has no such safety
+                // net — nothing else ever touches localRotation outside
+                // this routine, so leaving it turned bled into the NEXT
+                // engagement's starting pose (user-reported regression).
+                portrait.localRotation = restRotation;
                 yield break;
             }
 
@@ -1707,10 +1800,15 @@ namespace StarBound.UI
                     ? Mathf.Lerp(0f, FleeFailPeakFraction, t / 0.5f)
                     : Mathf.Lerp(FleeFailPeakFraction, 0f, (t - 0.5f) / 0.5f);
                 portrait.anchoredPosition = restPosition + new Vector2(FleeDistance * direction * travel, 0f);
+                // Normalized to the SAME 0→1→0 shape as travel itself
+                // (travel peaks at FleeFailPeakFraction, not 1) — turn
+                // peaks exactly when the lateral lurch does.
+                portrait.localRotation = Quaternion.Slerp(restRotation, turnRotation, travel / FleeFailPeakFraction);
                 yield return null;
             }
 
             portrait.anchoredPosition = restPosition;
+            portrait.localRotation = restRotation;
             sprite.color = restColor;
         }
 
@@ -1917,8 +2015,6 @@ namespace StarBound.UI
                 var spriteColor = spriteRestColor;
                 spriteColor.a = Mathf.Lerp(spriteRestColor.a, 0f, t);
                 sprite.color = spriteColor;
-                var portraitScale = Mathf.Lerp(1f, 0.3f, t);
-                portrait.localScale = new Vector3(portraitScale, portraitScale, 1f);
 
                 yield return null;
             }
@@ -1985,7 +2081,8 @@ namespace StarBound.UI
 
             if (session.Outcome != EngagementOutcome.InProgress)
             {
-                var outcomeText = DescribeOutcome(session.Outcome, playerName, opponentDisplayName, session.IsPvP);
+                var outcomeText = DescribeOutcome(session.Outcome, playerName, opponentDisplayName, session.IsPvP, session.LastKillRewardMoney,
+                    session.IsBountyTarget ? session.BountyRewardMoney : null);
                 // Escape outcomes describe as empty (see DescribeOutcome) —
                 // the round banner already said it, so hide the line
                 // entirely rather than leaving a blank gap where it was.
@@ -2034,7 +2131,8 @@ namespace StarBound.UI
                 actionInstructionText.text = $"{playerName}: choose your move.";
                 actionInstructionText.color = playerAccentColor;
 
-                var (escapeButton, _, _) = ScreenChromeKit.CreateButton(actionRow, "Attempt Escape",
+                var (escapeButton, _, _) = ScreenChromeKit.CreateButton(actionRow,
+                    $"Attempt Escape (-{CombatResolver.EscapeAttemptEnergyCost} Nrg)",
                     session.CanAttemptEscape ? ScreenChromeKit.AccentColor : ScreenChromeKit.DisabledColor,
                     session.CanAttemptEscape, GlassPanelMaterials.Style.DieButton, width: ActionButtonWidth, height: 56f, fontSize: 14);
                 escapeButton.onClick.AddListener(() => onAttemptEscape?.Invoke());
@@ -2097,7 +2195,8 @@ namespace StarBound.UI
                 actionInstructionText.text = $"{opponentDisplayName}: escape, brace, or hold?";
                 actionInstructionText.color = opponentAccentColor;
 
-                var (opponentEscapeButton, _, _) = ScreenChromeKit.CreateButton(actionRow, "Escape",
+                var (opponentEscapeButton, _, _) = ScreenChromeKit.CreateButton(actionRow,
+                    $"Escape (-{CombatResolver.EscapeAttemptEnergyCost} Nrg)",
                     session.Definition.EscapeAllowed ? ScreenChromeKit.AccentColor : ScreenChromeKit.DisabledColor,
                     session.Definition.EscapeAllowed, GlassPanelMaterials.Style.DieButton, width: ThirdActionWidth, height: 56f, fontSize: 12);
                 opponentEscapeButton.onClick.AddListener(() => onOpponentAttemptEscape?.Invoke());
@@ -2130,9 +2229,23 @@ namespace StarBound.UI
         // ("{name} escaped!") — restating them here as "Outcome:
         // PlayerEscaped" was pure noise. Win/Loss get a proper sentence
         // instead, since nothing else on screen says who actually won.
-        private static string DescribeOutcome(EngagementOutcome outcome, string playerName, string opponentDisplayName, bool isPvP) => outcome switch
+        // killRewardMoney is only ever non-null for a PvE win (see
+        // EngagementSession.LastKillRewardMoney) — a user-reported gap
+        // was a plain kill paying out with no confirmation of what (if
+        // anything) was actually awarded. bountyRewardMoney is a SEPARATE
+        // amount from killRewardMoney — JobService.ResolveBountyOutcome
+        // pays it on top of (not instead of) the ordinary kill reward —
+        // and is only passed in by the caller when this session actually
+        // IS the player's marked bounty target (see
+        // EngagementSession.IsBountyTarget's own comment on why that's
+        // re-derived independently rather than trusted here).
+        private static string DescribeOutcome(EngagementOutcome outcome, string playerName, string opponentDisplayName, bool isPvP, int? killRewardMoney,
+            int? bountyRewardMoney = null) => outcome switch
         {
-            EngagementOutcome.PlayerWon => isPvP ? $"{playerName} wins!" : "Victory!",
+            EngagementOutcome.PlayerWon => isPvP
+                ? $"{playerName} wins!"
+                : (killRewardMoney is > 0 ? $"Victory! +${killRewardMoney} salvaged." : "Victory!")
+                  + (bountyRewardMoney is > 0 ? $" Bounty claimed: +${bountyRewardMoney}!" : ""),
             EngagementOutcome.PlayerLost => isPvP ? $"{opponentDisplayName} wins!" : "Defeat.",
             EngagementOutcome.PlayerEscaped or EngagementOutcome.OpponentEscaped => string.Empty,
             _ => outcome.ToString()

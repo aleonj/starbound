@@ -25,6 +25,7 @@ namespace StarBound.Combat
     {
         public const int BraceShieldBonus = 2;
         public const int BraceEnergyCost = 1;
+        public const int EscapeAttemptEnergyCost = 1;
 
         // A single d10 + Speed check for one side — split out of
         // ResolveInitiative/ResolveEscapeAttempt below so PvP can run an
@@ -109,13 +110,17 @@ namespace StarBound.Combat
         // other side's roll as two genuinely separate taps (see
         // EngagementSession.BeginEscapeAttempt/BeginOpponentEscapeAttempt/
         // ResolveEscapeIntercept) instead of both happening silently in
-        // one call.
-        public static EscapeAttemptResult DetermineEscapeOutcome(Ship escapee, int escapeeRoll, int escapeeTotal, int otherRoll, int otherTotal)
+        // one call. Doesn't charge Energy itself (despite the attempt
+        // always costing it, win or lose — see EscapeAttemptEnergyCost's
+        // own comment) — callers charge it the moment the attempt
+        // actually BEGINS (see EngagementSession.AttemptEscape/
+        // AttemptOpponentEscape/BeginEscapeAttempt/BeginOpponentEscapeAttempt),
+        // not here at resolution, so the UI reflects the cost immediately
+        // on commit rather than only once the (possibly PvP, tap-delayed)
+        // intercept roll finally resolves.
+        public static EscapeAttemptResult DetermineEscapeOutcome(int escapeeRoll, int escapeeTotal, int otherRoll, int otherTotal)
         {
             var success = escapeeTotal >= otherTotal;
-            if (!success)
-                escapee.ApplyStatDelta(CoreStat.Energy, -1);
-
             return new EscapeAttemptResult(escapeeRoll, escapeeTotal, otherRoll, otherTotal, success);
         }
 
@@ -125,12 +130,17 @@ namespace StarBound.Combat
         // Composes the two pieces above — same RNG order (escapee rolls
         // first, then other) and identical result as before the split, so
         // NPC fights and existing call sites are unaffected. PvP uses the
-        // split pieces directly instead, for a real two-tap roll.
+        // split pieces directly instead, for a real two-tap roll (see
+        // EngagementSession.BeginEscapeAttempt/BeginOpponentEscapeAttempt,
+        // which charge the SAME cost themselves at their own begin step,
+        // for the identical reason this one charges it here: the moment
+        // the attempt is made, not once it resolves).
         public static EscapeAttemptResult ResolveEscapeAttempt(Ship escapee, Ship other, Random rng)
         {
+            escapee.ApplyStatDelta(CoreStat.Energy, -EscapeAttemptEnergyCost);
             var (roll, total) = RollSpeedCheck(escapee, rng);
             var (otherRoll, otherTotal) = RollSpeedCheck(other, rng);
-            return DetermineEscapeOutcome(escapee, roll, total, otherRoll, otherTotal);
+            return DetermineEscapeOutcome(roll, total, otherRoll, otherTotal);
         }
     }
 }

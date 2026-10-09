@@ -5,40 +5,73 @@ using StarBound.Map;
 
 namespace StarBound.Multiplayer
 {
-    // Builds the (variable, goal) pair for one progression event — see
-    // Match for when this fires (every EngagementsPerProgressionEvent
-    // successful engagements) and how each goal type's completion is
-    // actually checked. Placeholder balance numbers, tunable here, same
-    // convention as EngagementDefinitionTable/EngagementPlacer.
+    // Builds goal events and picks variable events — see Match for when
+    // each actually fires (two INDEPENDENT win-counters now, see
+    // Match.HandleProgressionOnEngagementWin — goal and variable events
+    // used to be bundled into one combined event, firing and replacing
+    // together; decoupled so events turn over on their own cadence
+    // rather than being tied to goal pacing, and so they keep cycling
+    // for the whole match instead of stopping once Hard tier unlocks,
+    // same as goal-firing does). Placeholder balance numbers, tunable
+    // here, same convention as EngagementDefinitionTable/EngagementPlacer.
     public static class MatchProgressionService
     {
         private static readonly MatchVariable[] Variables =
         {
             MatchVariable.MinefieldDamage,
-            MatchVariable.TradeBoom
+            MatchVariable.AsteroidStorm,
+            MatchVariable.FuelShortage,
+            MatchVariable.PirateSurge,
+            MatchVariable.IonStorm,
+            MatchVariable.TradeBoom,
+            MatchVariable.CalmSpace,
+            MatchVariable.MarketCrash,
+            MatchVariable.RepairDiscount,
+            MatchVariable.SalvageRush,
+            MatchVariable.BountySeason
         };
 
         private const int TravelAndPayMoneyRequired = 40;
         private const int TravelAndPayReward = 75;
         private const int DefeatNamedTargetReward = 100;
 
-        public static (MatchVariable Variable, MatchGoal Goal) FireEvent(
-            GameMap map, HexCoordinate playerOnePosition, HexCoordinate playerTwoPosition,
-            EngagementTier currentMaxUnlockedTier, Random rng)
+        // User-requested: Tradelane/Wormhole hexes exist for passing
+        // through, not for being a destination — neither goal type should
+        // ever target one. Same exclusion EngagementPlacer applies to its
+        // own marker candidates, kept in sync deliberately (a
+        // DefeatNamedTarget goal creates a real engagement marker on its
+        // target hex, so it has to honor the same rule that governs every
+        // other marker).
+        private static readonly TerrainType[] IneligibleTargetTerrain = { TerrainType.Tradelane, TerrainType.Wormhole };
+
+        // Picks a variable event — independent of FireGoalEvent below,
+        // and deliberately never re-picks the CURRENTLY active one
+        // (replacing an event with itself wouldn't read as a new event
+        // at all) by excluding it from the draw pool, falling back to
+        // the full pool only if excluding it would leave nothing to
+        // pick from.
+        public static MatchVariable PickVariable(Random rng, MatchVariable currentlyActive)
         {
-            var variable = Variables[rng.Next(Variables.Length)];
-            var goal = rng.NextDouble() < 0.5
+            var pool = Variables.Where(v => v != currentlyActive).ToArray();
+            if (pool.Length == 0)
+                pool = Variables;
+
+            return pool[rng.Next(pool.Length)];
+        }
+
+        public static MatchGoal FireGoalEvent(
+            GameMap map, HexCoordinate playerOnePosition, HexCoordinate playerTwoPosition,
+            EngagementTier currentMaxUnlockedTier, Random rng) =>
+            rng.NextDouble() < 0.5
                 ? BuildTravelAndPayGoal(map, playerOnePosition, playerTwoPosition, rng)
                 : BuildDefeatNamedTargetGoal(map, playerOnePosition, playerTwoPosition, currentMaxUnlockedTier, rng);
-
-            return (variable, goal);
-        }
 
         private static MatchGoal BuildTravelAndPayGoal(
             GameMap map, HexCoordinate playerOnePosition, HexCoordinate playerTwoPosition, Random rng)
         {
             var candidates = map.Hexes
-                .Where(h => h.Coordinate != playerOnePosition && h.Coordinate != playerTwoPosition)
+                .Where(h => h.Coordinate != playerOnePosition && h.Coordinate != playerTwoPosition &&
+                    !IneligibleTargetTerrain.Contains(h.Terrain))
                 .ToList();
 
             var target = candidates[rng.Next(candidates.Count)].Coordinate;
@@ -62,7 +95,8 @@ namespace StarBound.Multiplayer
         {
             var candidates = map.Hexes
                 .Where(h => h.Engagement == EngagementTier.None &&
-                    h.Coordinate != playerOnePosition && h.Coordinate != playerTwoPosition)
+                    h.Coordinate != playerOnePosition && h.Coordinate != playerTwoPosition &&
+                    !IneligibleTargetTerrain.Contains(h.Terrain))
                 .ToList();
 
             if (candidates.Count == 0)

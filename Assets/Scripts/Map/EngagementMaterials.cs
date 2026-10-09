@@ -30,6 +30,20 @@ namespace StarBound.Map
             return material;
         }
 
+        private static Material waypointBeacon;
+        private static Material goalBeacon;
+
+        // Same EngagementBeacon shader/mesh as a real tier marker (see
+        // HexMarkerOverride) — colors kept identical to the old
+        // HighlightMaterials.WaypointHighlight/GoalTargetHighlight ring
+        // colors this replaces, so the meaning ("violet = job waypoint,"
+        // "magenta = race goal") carries over for anyone already used to it.
+        public static Material WaypointBeacon =>
+            waypointBeacon = waypointBeacon != null ? waypointBeacon : CreateMaterial(new Color(0.65f, 0.35f, 0.95f));
+
+        public static Material GoalBeacon =>
+            goalBeacon = goalBeacon != null ? goalBeacon : CreateMaterial(new Color(0.9f, 0.15f, 0.55f));
+
         private static Material CreateMaterial(Color color) => new(Shader.Find("StarBound/EngagementBeacon"))
         {
             color = color

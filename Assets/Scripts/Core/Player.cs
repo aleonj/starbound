@@ -37,6 +37,93 @@ namespace StarBound.Core
         public IReadOnlyCollection<HexCoordinate> DiscoveredEngagementHexes => discoveredEngagementHexes;
         public void DiscoverHex(HexCoordinate coordinate) => discoveredEngagementHexes.Add(coordinate);
 
+        // Set by IntegrityPenaltyService when this player's ship is
+        // destroyed. Can't just be surfaced immediately like other
+        // engagement messages — a PvP loss can deplete the OTHER player's
+        // Hull, who isn't necessarily the one looking at the device right
+        // now — so it waits here until this player's own turn actually
+        // starts (see MatchHud.OnHandoffConfirmed).
+        public string PendingTurnStartNotice { get; private set; }
+
+        public void SetPendingTurnStartNotice(string message) => PendingTurnStartNotice = message;
+
+        public string ConsumePendingTurnStartNotice()
+        {
+            var notice = PendingTurnStartNotice;
+            PendingTurnStartNotice = null;
+            return notice;
+        }
+
+        // A separate one-shot slot from PendingTurnStartNotice above, not
+        // a reuse of it — a tier unlock is match-global (see
+        // Match.MaxUnlockedTier/CompleteGoal) and can land on a turn that
+        // ALSO sets this player's ordinary notice (e.g. a PvP win as one
+        // action, a goal-completing engagement as the other, within the
+        // same turn's two-action budget — see Match.ActionsPerTurn).
+        // Sharing one slot would let the second overwrite the first
+        // before either was ever shown.
+        public string PendingTierUnlockNotice { get; private set; }
+
+        public void SetPendingTierUnlockNotice(string message) => PendingTierUnlockNotice = message;
+
+        public string ConsumePendingTierUnlockNotice()
+        {
+            var notice = PendingTierUnlockNotice;
+            PendingTierUnlockNotice = null;
+            return notice;
+        }
+
+        // A third, independent one-shot slot — same reasoning as
+        // PendingTierUnlockNotice's own comment, a new MatchVariable
+        // event is ALSO match-global (see Match.HandleProgressionOnEngagementWin)
+        // and can coincide with either of the other two within one
+        // turn's two-action budget.
+        public string PendingVariableEventNotice { get; private set; }
+
+        public void SetPendingVariableEventNotice(string message) => PendingVariableEventNotice = message;
+
+        public string ConsumePendingVariableEventNotice()
+        {
+            var notice = PendingVariableEventNotice;
+            PendingVariableEventNotice = null;
+            return notice;
+        }
+
+        // A fourth, independent one-shot slot — same reasoning as
+        // PendingVariableEventNotice above. A race goal firing
+        // (Match.HandleProgressionOnEngagementWin) was previously never
+        // announced at all, only shown as a passive status label (the
+        // same gap MatchVariable had before it got PendingVariableEventNotice).
+        public string PendingGoalNotice { get; private set; }
+
+        public void SetPendingGoalNotice(string message) => PendingGoalNotice = message;
+
+        public string ConsumePendingGoalNotice()
+        {
+            var notice = PendingGoalNotice;
+            PendingGoalNotice = null;
+            return notice;
+        }
+
+        // Also set by IntegrityPenaltyService alongside the notice above,
+        // whenever a destroyed ship's Position changes — consumed (and
+        // cleared) by the map view so it can skip the normal glide-
+        // across-the-map travel animation for this specific position
+        // change and play a vanish/materialize effect at the new hex
+        // instead. A destroyed ship didn't fly there; a fresh one
+        // appeared — gliding there reads as "they survived," which is
+        // backwards.
+        public bool JustTeleported { get; private set; }
+
+        public void MarkTeleported() => JustTeleported = true;
+
+        public bool ConsumeTeleported()
+        {
+            var value = JustTeleported;
+            JustTeleported = false;
+            return value;
+        }
+
         public Player(string id, string displayName, Ship ship)
         {
             if (string.IsNullOrWhiteSpace(id))

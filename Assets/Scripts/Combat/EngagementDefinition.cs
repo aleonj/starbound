@@ -31,5 +31,19 @@ namespace StarBound.Combat
             SpeedRange = speedRange;
             EscapeAllowed = escapeAllowed;
         }
+
+        // MatchVariable.PirateSurge (see EngagementTrigger) — shifts only
+        // the "performance" stats (Weapons/Shields/Speed), not Hull,
+        // matching the same Weapons/Shields/Speed-only convention the
+        // tier-readiness gate uses (see Match.IsReadyForTier) — Hull is a
+        // depleting health pool, not a combat-performance stat, so a
+        // "stronger NPC" boost shouldn't also just mean "more Hull to
+        // grind through."
+        public EngagementDefinition WithPerformanceStatBoost(int delta) =>
+            new(Tier, HullRange,
+                (WeaponsRange.Min + delta, WeaponsRange.Max + delta),
+                (ShieldsRange.Min + delta, ShieldsRange.Max + delta),
+                (SpeedRange.Min + delta, SpeedRange.Max + delta),
+                EscapeAllowed);
     }
 }

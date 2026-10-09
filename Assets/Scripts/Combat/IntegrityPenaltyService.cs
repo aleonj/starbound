@@ -6,10 +6,12 @@ using StarBound.Map;
 
 namespace StarBound.Combat
 {
-    // Applies whenever a player's Hull or Energy reaches 0, in or out of
-    // combat — not wired into EngagementSession automatically, since the
-    // rule applies more broadly than just combat. Callers should invoke
-    // this after anything that can deplete Hull/Energy.
+    // Applies whenever a player's Hull reaches 0, in or out of combat —
+    // not wired into EngagementSession automatically, since the rule
+    // applies more broadly than just combat. Callers should invoke this
+    // after anything that can deplete Hull. Energy deliberately does NOT
+    // trigger this (see Ship.IsIntegrityDepleted) — it's a movement-die
+    // economy now, not a second destruction condition.
     public static class IntegrityPenaltyService
     {
         // moneyLost lets a PvP caller (see Match.ResolveActiveEngagement)

@@ -33,7 +33,7 @@ namespace StarBound.Tests
             Assert.AreEqual(new HexCoordinate(2, 0), player.Position);
             Assert.AreEqual(Ship.DefaultStatValue, ship.GetStat(CoreStat.Hull),
                 "Depleted Hull must reset, not leave the player stuck at 0 with no money to repair.");
-            Assert.AreEqual(Ship.DefaultStatValue, ship.GetStat(CoreStat.Energy),
+            Assert.AreEqual(Ship.MaxEnergyValue, ship.GetStat(CoreStat.Energy),
                 "Energy resets too, even though only Hull triggered the penalty here — this is a fresh start, not a partial one.");
             // A destroyed player always gets told what happened on their
             // next turn — not necessarily the one looking at the device
@@ -64,20 +64,22 @@ namespace StarBound.Tests
         }
 
         [Test]
-        public void ApplyIfDepleted_EnergyZero_AlsoTriggersPenalty()
+        public void ApplyIfDepleted_EnergyZero_NoLongerTriggersPenalty()
         {
+            // Energy is a movement-die economy now, not a second
+            // destruction condition — see Ship.IsIntegrityDepleted's own
+            // comment. Only Hull reaching 0 should trigger this.
             var map = new GameMap(radius: 1, Difficulty.Medium);
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
             var ship = new Ship(cargoCapacity: 3, startingMoney: 50);
-            ship.ApplyStatDelta(CoreStat.Energy, -3);
+            ship.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue);
             var player = new Player("p1", "Test", ship) { Position = new HexCoordinate(0, 0) };
 
             var applied = IntegrityPenaltyService.ApplyIfDepleted(player, map, new Random(1), out _);
 
-            Assert.IsTrue(applied);
-            Assert.AreEqual(0, ship.Money);
-            Assert.AreEqual(Ship.DefaultStatValue, ship.GetStat(CoreStat.Energy));
-            Assert.AreEqual(Ship.DefaultStatValue, ship.GetStat(CoreStat.Hull));
+            Assert.IsFalse(applied);
+            Assert.AreEqual(50, ship.Money);
+            Assert.AreEqual(0, ship.GetStat(CoreStat.Energy));
         }
 
         [Test]
@@ -91,13 +93,13 @@ namespace StarBound.Tests
             map.SetHex(new Hex(new HexCoordinate(0, 0), TerrainType.PlanetOrStarport));
             var ship = new Ship(cargoCapacity: 3, startingMoney: 50);
             ship.ApplyStatDelta(CoreStat.Hull, -3);
-            ship.ApplyStatDelta(CoreStat.Energy, -1); // damaged, but not depleted on its own
+            ship.ApplyStatDelta(CoreStat.Energy, -1); // damaged, but doesn't matter either way now
             var player = new Player("p1", "Test", ship) { Position = new HexCoordinate(0, 0) };
 
             IntegrityPenaltyService.ApplyIfDepleted(player, map, new Random(1), out _);
 
             Assert.AreEqual(Ship.DefaultStatValue, ship.GetStat(CoreStat.Hull));
-            Assert.AreEqual(Ship.DefaultStatValue, ship.GetStat(CoreStat.Energy));
+            Assert.AreEqual(Ship.MaxEnergyValue, ship.GetStat(CoreStat.Energy));
         }
 
         [Test]

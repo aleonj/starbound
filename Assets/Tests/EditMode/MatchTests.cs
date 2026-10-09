@@ -739,7 +739,11 @@ namespace StarBound.Tests
 
             match.ResolveActiveEngagement(new Random(1));
 
-            Assert.AreEqual(200, p1.Ship.Money);
+            // 200 (bounty reward) + 15 (the plain per-kill reward every
+            // Easy-tier PvE win now also pays — see
+            // EngagementSession.DefeatRewardMoney) — the two are
+            // separate, additive rewards, not mutually exclusive.
+            Assert.AreEqual(215, p1.Ship.Money);
             Assert.IsNull(p1.ActiveJob);
         }
 
@@ -1234,12 +1238,14 @@ namespace StarBound.Tests
         }
 
         // Wins the two pre-placed Easy engagements back to back — crossing
-        // EngagementsPerProgressionEvent's threshold on the second win, so
-        // whatever event fires is decided by resolutionSeed (the only rng
-        // MatchProgressionService.FireEvent actually consumes here, since
-        // the first win doesn't cross the threshold). Leaves p1 as
-        // CurrentPlayer with a fresh, unspent action budget, sitting at
-        // (1,-1).
+        // EngagementsPerProgressionEvent's (goal) AND EngagementsPerVariableEvent's
+        // (variable, decoupled but same starting count/threshold so they
+        // still cross together here) thresholds on the second win, so
+        // whatever goal/variable fires is decided by resolutionSeed (the
+        // only rng FireGoalEvent/PickVariable actually consume here,
+        // since the first win doesn't cross either threshold). Leaves p1
+        // as CurrentPlayer with a fresh, unspent action budget, sitting
+        // at (1,-1).
         private static void WinTwoEasyEngagementsAndFireAnEvent(Match match, Player p1, int resolutionSeed)
         {
             p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
@@ -1323,6 +1329,56 @@ namespace StarBound.Tests
             Assert.AreNotEqual(MatchVariable.None, match.ActiveVariable);
             Assert.IsNotNull(match.ActiveGoal);
             Assert.AreEqual(EngagementTier.Easy, match.MaxUnlockedTier, "Firing the event alone shouldn't advance the phase — only completing its goal does.");
+        }
+
+        [Test]
+        public void ProgressionEvent_FiresAfterTwoWins_NotifiesBothPlayers()
+        {
+            var (match, p1, p2) = BuildProgressionMatch();
+
+            WinTwoEasyEngagementsAndFireAnEvent(match, p1, resolutionSeed: 1);
+
+            // Both players, not just whoever won the fight — ActiveVariable
+            // is shared match state (see Match.HandleProgressionOnEngagementWin).
+            Assert.IsFalse(string.IsNullOrEmpty(p1.PendingVariableEventNotice));
+            Assert.IsFalse(string.IsNullOrEmpty(p2.PendingVariableEventNotice));
+            StringAssert.Contains(MatchVariableDescriptions.Describe(match.ActiveVariable), p1.PendingVariableEventNotice);
+        }
+
+        [Test]
+        public void ProgressionEvent_FiresAfterTwoWins_NotifiesBothPlayersOfTheNewGoalToo()
+        {
+            // User-reported: the variable event got announced but the goal
+            // that fires in lockstep with it (see
+            // HandleProgressionOnEngagementWin) did not — same gap
+            // PendingVariableEventNotice closed, now closed for goals too.
+            var (match, p1, p2) = BuildProgressionMatch();
+
+            WinTwoEasyEngagementsAndFireAnEvent(match, p1, resolutionSeed: 1);
+
+            Assert.IsFalse(string.IsNullOrEmpty(p1.PendingGoalNotice));
+            Assert.IsFalse(string.IsNullOrEmpty(p2.PendingGoalNotice));
+            StringAssert.Contains(MatchGoalDescriptions.Describe(match.Map, match.ActiveGoal), p1.PendingGoalNotice);
+        }
+
+        [Test]
+        public void VariableEvent_KeepsFiringPastHardTier_EvenThoughGoalEventsStopThere()
+        {
+            // User-requested: variable events should be decoupled from
+            // goal events entirely — in particular, they must NOT get
+            // stuck permanently once Hard tier unlocks and stops goal
+            // events from firing (MaxUnlockedTier < Hard gates goal
+            // firing, deliberately NOT variable firing — see
+            // HandleProgressionOnEngagementWin's own comment).
+            var (match, p1, _) = BuildProgressionMatch();
+            match.UnlockTier(EngagementTier.Hard);
+
+            WinTwoEasyEngagementsAndFireAnEvent(match, p1, resolutionSeed: 1);
+
+            Assert.AreNotEqual(MatchVariable.None, match.ActiveVariable,
+                "Variable events should still fire even though Hard tier is already unlocked.");
+            Assert.IsNull(match.ActiveGoal,
+                "Goal events stay gated on MaxUnlockedTier < Hard — unaffected by decoupling variable events from that gate.");
         }
 
         // Mines/Asteroids damage is a per-arrival chance now (see
@@ -1422,7 +1478,15 @@ namespace StarBound.Tests
         public void TradeBoomVariable_EnteringATradelaneHex_WaivesTheToll()
         {
             var (match, p1, _) = BuildMatchWithVariable(MatchVariable.TradeBoom);
-            Assert.AreEqual(0, p1.Ship.Money); // no starting money — an unwaived toll would block this move outright
+            // BuildMatchWithVariable wins 2 Easy PvE fights to fire the
+            // event (see WinTwoEasyEngagementsAndFireAnEvent), which now
+            // also pays the plain per-kill reward — spent back down to 0
+            // here so the toll-waiver proof below still holds: with ANY
+            // money left, a successful move wouldn't prove the toll was
+            // actually waived, just that the toll (only 1) was affordable
+            // regardless.
+            p1.Ship.TrySpendMoney(p1.Ship.Money);
+            Assert.AreEqual(0, p1.Ship.Money); // no money — an unwaived toll would block this move outright
 
             match.RollDice(new Random(1));
             var result = match.Move(new RolledDie(0, TerrainType.Tradelane), new HexCoordinate(1, -2), new Random(1));
@@ -1477,6 +1541,60 @@ namespace StarBound.Tests
             Assert.IsNull(match.ActiveGoal);
             Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier);
             Assert.GreaterOrEqual(p1.Ship.Money, goal.RewardMoney);
+        }
+
+        [Test]
+        public void DefeatNamedTargetGoal_TriggeringIt_MarksTheSessionAsTheGoalTarget()
+        {
+            // User-reported: found the goal's marked engagement but "the
+            // engagement screen didn't mention it." See
+            // Match.HandleArrival's own comment on why this is gated to
+            // DefeatNamedTarget specifically, not just "coordinates
+            // happen to match" (the companion TravelAndPay test below
+            // confirms the negative case).
+            var (match, p1, _) = BuildMatchWithGoalType(MatchGoalType.DefeatNamedTarget);
+            var goal = match.ActiveGoal;
+            match.Map.TryGetHex(goal.TargetHex, out var targetHex);
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, targetHex.Terrain), goal.TargetHex, new Random(1));
+
+            Assert.IsTrue(match.IsInEngagement);
+            Assert.IsTrue(match.ActiveEngagement.IsGoalTarget);
+        }
+
+        [Test]
+        public void TravelAndPayGoal_CoincidentallyOverlappingAnEngagementHex_DoesNotMarkTheSessionAsTheGoalTarget()
+        {
+            // TravelAndPay's target hex has no exclusion against already-
+            // marked hexes (see MatchProgressionService.BuildTravelAndPayGoal),
+            // so it COULD coincidentally be one — but fighting (and
+            // winning) that engagement does nothing toward completing a
+            // TravelAndPay goal, only arrival + having enough money does.
+            // Tagging the fight screen "Race Goal" there would wrongly
+            // imply this fight matters for it (see Match.HandleArrival's
+            // own comment). Retrofitting an Easy marker onto the goal's
+            // own target hex — whichever hex MatchProgressionService
+            // happened to pick — deterministically constructs the
+            // coincidence regardless of seed. Deliberately left with 0
+            // money (the default) — enough to trigger the engagement, not
+            // enough to ALSO complete the goal on this same arrival (see
+            // TryCompleteTravelAndPayGoal), which would null out
+            // ActiveGoal before the engagement check even runs and mask
+            // what this test is actually trying to isolate: the Type
+            // check, not just "no goal was active any more."
+            var (match, p1, _) = BuildMatchWithGoalType(MatchGoalType.TravelAndPay);
+            var goal = match.ActiveGoal;
+            match.Map.TryGetHex(goal.TargetHex, out var targetHex);
+            targetHex.Engagement = EngagementTier.Easy;
+
+            p1.Position = HexMath.Neighbors(goal.TargetHex).First(n => match.Map.TryGetHex(n, out _));
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, targetHex.Terrain), goal.TargetHex, new Random(1));
+
+            Assert.IsNotNull(match.ActiveGoal, "The goal must still be active (insufficient funds to complete it) for this test to actually isolate the Type check.");
+            Assert.IsTrue(match.IsInEngagement, "The retrofitted Easy marker should still trigger normally.");
+            Assert.IsFalse(match.ActiveEngagement.IsGoalTarget);
         }
 
         // --- Tier-unlock readiness gate (Match.CompleteGoal / IsReadyForTier) ---
@@ -1541,6 +1659,14 @@ namespace StarBound.Tests
             CompleteActiveGoal(match, p1);
             Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier);
 
+            // This first transition also sets PendingTierUnlockNotice on
+            // both players (see CompleteGoal) — consumed here to simulate
+            // the UI already having shown it, so callers testing the
+            // SECOND (Hard) transition start from a clean slate rather
+            // than seeing this stale "Medium unlocked" leftover.
+            p1.ConsumePendingTierUnlockNotice();
+            p2.ConsumePendingTierUnlockNotice();
+
             match.EndTurn();
             match.EndTurn();
             p1.Position = new HexCoordinate(0, 0);
@@ -1573,6 +1699,8 @@ namespace StarBound.Tests
             Assert.IsNull(match.ActiveGoal,
                 "The goal itself is still claimed even though the tier didn't advance — this delays, not blocks, progress.");
             Assert.GreaterOrEqual(p1.Ship.Money, moneyBefore + reward);
+            Assert.IsNull(p1.PendingTierUnlockNotice, "No unlock happened — neither player should be notified of one.");
+            Assert.IsNull(p2.PendingTierUnlockNotice);
         }
 
         [Test]
@@ -1589,6 +1717,8 @@ namespace StarBound.Tests
 
             Assert.AreEqual(EngagementTier.Medium, match.MaxUnlockedTier,
                 "MaxUnlockedTier is shared match state — one player's gear can't open Hard on the other's behalf.");
+            Assert.IsNull(p1.PendingTierUnlockNotice, "No unlock happened — neither player should be notified of one.");
+            Assert.IsNull(p2.PendingTierUnlockNotice);
         }
 
         [Test]
@@ -1604,6 +1734,161 @@ namespace StarBound.Tests
             });
 
             Assert.AreEqual(EngagementTier.Hard, match.MaxUnlockedTier);
+            Assert.AreEqual("Hard engagements are now unlocked!", p1.PendingTierUnlockNotice,
+                "Both players should be notified, not just the awardee — the ceiling is shared.");
+            Assert.AreEqual("Hard engagements are now unlocked!", p2.PendingTierUnlockNotice);
+        }
+
+        // --- Energy as a movement-die economy ([Combat] Energy overhaul) ---
+
+        [Test]
+        public void RollDice_WhenEnergyIsZero_ThrowsAndCanRollDiceIsFalse()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue);
+
+            Assert.IsFalse(match.CanRollDice);
+            Assert.Throws<InvalidOperationException>(() => match.RollDice(new Random(1)));
+        }
+
+        [Test]
+        public void Move_DieIndexAtOrBeyondCurrentEnergy_FailsWithNotEnoughEnergy()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -3); // Energy = 2 — only die indices 0 and 1 are usable
+            match.RollDice(new Random(1));
+
+            // The target coordinate is irrelevant here — ShipMover.TryMove
+            // checks Energy before adjacency/terrain, same ordering as
+            // the existing DieAlreadySpent check it sits next to.
+            var lockedDie = new RolledDie(dieIndex: 2, TerrainType.ClearSpace);
+            var result = match.Move(lockedDie, new HexCoordinate(99, 99), new Random(1));
+
+            Assert.IsFalse(result.Success);
+            Assert.AreEqual(MoveFailureReason.NotEnoughEnergy, result.FailureReason);
+        }
+
+        [Test]
+        public void Move_DieIndexWithinCurrentEnergy_Succeeds()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -3); // Energy = 2 — die index 0 is still usable
+            match.RollDice(new Random(1));
+
+            var usableDie = new RolledDie(dieIndex: 0, TerrainType.ClearSpace);
+            var result = match.Move(usableDie, new HexCoordinate(1, 0), new Random(1));
+
+            Assert.IsTrue(result.Success);
+        }
+
+        [Test]
+        public void EndTurn_NeverRolled_BanksNothing()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -3); // Energy = 2
+
+            match.EndTurn();
+
+            Assert.AreEqual(2, p1.Ship.GetStat(CoreStat.Energy),
+                "Never rolling means no dice were ever made available to under-use — nothing to bank.");
+        }
+
+        [Test]
+        public void EndTurn_RolledButDidNotMove_BanksOnlyTheDiceWithinTheEnergyCap()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -3); // Energy = 2 — only die indices 0 and 1 were ever usable
+
+            match.RollDice(new Random(1)); // all 5 dice stay unspent — never moved
+
+            match.EndTurn();
+
+            // Only indices 0 and 1 (2 dice) were ever within the Energy
+            // cap — indices 2-4 were never usable regardless of choice,
+            // so they don't count toward "left unused." min(2, MaxEnergyValue(5) - 2) = 2 banked.
+            Assert.AreEqual(4, p1.Ship.GetStat(CoreStat.Energy));
+        }
+
+        [Test]
+        public void EndTurn_UsedSomeDiceWithinTheEnergyCap_BanksOnlyTheRemainingCappedOnes()
+        {
+            // Regression coverage for a user-reported bug: Energy = 3
+            // (3 usable dice), 2 of those 3 used, 1 left unused — banking
+            // used to count ALL 5 rolled dice as "unspent" (including the
+            // 2 beyond the cap that were never usable at all), landing at
+            // full Energy (5) instead of the correct 3 + 1 = 4.
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -2); // Energy = 3 — dice 0-2 are within the cap, 3-4 never were
+
+            // Marks the REAL hand's dice spent directly, rather than
+            // moving through Match.Move with throwaway RolledDie objects
+            // (as other tests in this file do for convenience) — Move
+            // doesn't actually require the die it's given to be a member
+            // of currentHand, so a synthetic die's MarkSpent() never
+            // touches the real hand this test needs EndTurn to read.
+            var hand = match.RollDice(new Random(1));
+            hand.Dice[0].MarkSpent();
+            hand.Dice[1].MarkSpent(); // index 2 — the third capped die — is the only one genuinely left unused
+
+            match.EndTurn();
+
+            Assert.AreEqual(4, p1.Ship.GetStat(CoreStat.Energy));
+        }
+
+        [Test]
+        public void EndTurn_EngagementOccurredThisTurn_DoesNotBankTheDiceItLeftUnspent()
+        {
+            // An ambush exhausts the rest of the turn's actions (see
+            // Match.HandleArrival/ExhaustActions) — the 4 dice left
+            // unspent here were never a genuine choice to hold back, so
+            // they must not bank Energy the way a deliberately-ended
+            // turn with dice to spare would (see
+            // Match.ApplyEnergyForEndingTurn's own comment).
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -3); // Energy = 2 — well below max, so a bank would be visible if it happened
+            p1.Ship.ApplyStatDelta(CoreStat.Weapons, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Shields, 20);
+            p1.Ship.ApplyStatDelta(CoreStat.Speed, 20); // guaranteed win within ForceWin's round cap
+
+            match.RollDice(new Random(1));
+            match.Move(new RolledDie(0, TerrainType.ClearSpace), new HexCoordinate(0, -1), new Random(1)); // ambush
+            Assert.IsTrue(match.IsInEngagement);
+
+            ForceWin(match);
+            match.ResolveActiveEngagement(new Random(1));
+            match.EndTurn();
+
+            Assert.AreEqual(2, p1.Ship.GetStat(CoreStat.Energy));
+        }
+
+        [Test]
+        public void EndTurn_WhenTurnStartedAtZeroEnergy_FloorResetsInsteadOfBanking()
+        {
+            var (match, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue); // Energy = 0, drained mid-turn
+
+            match.EndTurn(); // p1's turn ends — it started healthy, so ordinary banking applies (no roll, no change)
+            Assert.AreEqual(0, p1.Ship.GetStat(CoreStat.Energy));
+
+            match.EndTurn(); // p2's turn ends — p1's NEXT turn now snapshots Energy=0 at its start
+            Assert.IsFalse(match.CanRollDice, "0 Energy at turn start blocks rolling — no movement is possible this turn.");
+
+            match.EndTurn(); // p1's turn ends — THIS turn started at 0, so the floor-reset applies instead
+
+            Assert.AreEqual(2, p1.Ship.GetStat(CoreStat.Energy));
+        }
+
+        [Test]
+        public void IsIntegrityDepleted_EnergyZero_NeverTriggersDestructionViaNormalPlay()
+        {
+            // End-to-end guard against a regression — Hull alone can
+            // destroy a ship now (see Ship.IsIntegrityDepleted), Energy
+            // hitting 0 through ordinary play (brace/failed escape) must
+            // not put the match into a destroyed state.
+            var (_, p1, _) = BuildMatch();
+            p1.Ship.ApplyStatDelta(CoreStat.Energy, -Ship.MaxEnergyValue);
+
+            Assert.IsFalse(p1.Ship.IsIntegrityDepleted);
         }
 
         // --- Persistent per-planet shop (PlanetShopService) ---

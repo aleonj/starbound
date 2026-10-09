@@ -21,6 +21,17 @@ namespace StarBound.Tests
         }
 
         [Test]
+        public void Generate_ExposesTheSeedItWasBuiltWith()
+        {
+            // Needed by HexNavigationDescriptions so per-hex flavor names
+            // stay stable within one match (same GameMap instance) while
+            // varying across different matches, same as generation itself.
+            var map = MapGenerator.Generate(radius: 3, Difficulty.Medium, seed: 77);
+
+            Assert.AreEqual(77, map.Seed);
+        }
+
+        [Test]
         public void Generate_IsDeterministicForSameSeed()
         {
             var mapA = MapGenerator.Generate(radius: 5, Difficulty.Hard, seed: 42);
